@@ -1,0 +1,60 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-build.txt
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Generate icons and run tests
+        run: |
+          python scripts/generate_icons.py
+          python -m unittest discover -s tests -v
+
+      - name: Build desktop app
+        run: python -m PyInstaller --clean --noconfirm "Pro Downloader.spec"
+
+      - name: Build installer
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "packaging\windows\ProDownloader.iss"'
+
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $installer = Get-Item "release\Pro-Downloader-Setup-1.0.0.exe"
+          $hash = Get-FileHash -Algorithm SHA256 $installer
+          "$($hash.Hash)  $($installer.Name)" | Set-Content -Encoding ascii "release\SHA256SUMS.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pro-Downloader-Windows
+          path: |
+            release/Pro-Downloader-Setup-1.0.0.exe
+            release/SHA256SUMS.txt
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/Pro-Downloader-Setup-1.0.0.exe
+            release/SHA256SUMS.txt

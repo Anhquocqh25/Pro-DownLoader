@@ -1,0 +1,8 @@
+[Unit]
+Description=Remove expired Pro Downloader media
+
+[Service]
+Type=oneshot
+User=prodownloader
+Group=prodownloader
+ExecStart=/usr/bin/find /var/lib/pro-downloader/downloads -maxdepth 1 -type f -mmin +1440 -delete

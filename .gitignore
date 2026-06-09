@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Build outputs
+build/
+dist/
+release/
+*.spec.bak
+
+# Runtime state and downloaded media
+data/
+downloads/
+logs/
+*.log
+*.part
+*.ytdl
+*.mp3
+*.mp4
+*.m4a
+*.webm
+*.mkv
+*.mov
+
+# Local credentials and browser state
+cookies*.json
+cookies*.txt
+*.env
+.env*
+vendors/douyin_downloader/config/config.yml
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local packaging tools
+/tools/

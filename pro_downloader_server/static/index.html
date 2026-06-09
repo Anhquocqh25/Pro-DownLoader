@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ef4b4b">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Pro Downloader">
+  <meta name="format-detection" content="telephone=no">
+  <title>Pro Downloader</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script defer src="/static/lucide.min.js"></script>
+  <script defer src="/static/app.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header">
+      <div class="brand">
+        <img src="/static/icons/icon.svg" alt="" class="brand-icon">
+        <div>
+          <h1>Pro Downloader</h1>
+          <button id="connectionButton" class="connection" type="button" aria-label="Server settings">
+            <span id="connectionDot" class="connection-dot"></span>
+            <span id="connectionText">Checking server</span>
+          </button>
+        </div>
+      </div>
+      <button id="installButton" class="icon-button" type="button" aria-label="Install app" title="Install app">
+        <i data-lucide="square-plus"></i>
+      </button>
+    </header>
+
+    <main>
+      <section class="url-section" aria-labelledby="urlLabel">
+        <label id="urlLabel" for="urlInput">Video URL</label>
+        <div class="url-control">
+          <textarea id="urlInput" rows="2" inputmode="url" autocomplete="url" autocapitalize="off"
+            spellcheck="false" placeholder="Paste a video URL"></textarea>
+          <button id="pasteButton" class="icon-button paste-button" type="button" aria-label="Paste URL" title="Paste URL">
+            <i data-lucide="clipboard-paste"></i>
+          </button>
+        </div>
+        <p id="urlError" class="field-error" role="alert" hidden></p>
+        <button id="fetchButton" class="primary-button" type="button">
+          <i data-lucide="scan-search"></i>
+          <span>Fetch</span>
+        </button>
+      </section>
+
+      <section id="mediaSection" class="media-section" aria-live="polite" hidden>
+        <div class="media-summary">
+          <div class="thumbnail-frame">
+            <img id="thumbnail" alt="">
+            <div id="thumbnailFallback" class="thumbnail-fallback">
+              <i data-lucide="video"></i>
+            </div>
+            <span id="duration" class="duration" hidden></span>
+          </div>
+          <div class="media-copy">
+            <h2 id="mediaTitle"></h2>
+            <p id="mediaMeta"></p>
+            <p id="mediaProvider" class="provider-line"></p>
+          </div>
+        </div>
+
+        <div class="segmented-control" role="group" aria-label="Media type">
+          <button class="segment is-active" type="button" data-media-format="video">
+            <i data-lucide="video"></i>
+            Video
+          </button>
+          <button class="segment" type="button" data-media-format="audio">
+            <i data-lucide="music-2"></i>
+            Audio
+          </button>
+        </div>
+
+        <div class="field-row">
+          <label for="formatSelect">Quality</label>
+          <select id="formatSelect"></select>
+        </div>
+
+        <details id="advancedPanel" class="advanced-panel">
+          <summary>
+            <span><i data-lucide="sliders-horizontal"></i>Advanced Options</span>
+            <i data-lucide="chevron-down" class="summary-chevron"></i>
+          </summary>
+          <div class="advanced-grid">
+            <div class="field-row">
+              <label for="cookieBrowser">Cookies</label>
+              <select id="cookieBrowser">
+                <option>Auto</option>
+                <option>None</option>
+                <option>Chrome</option>
+                <option>Edge</option>
+                <option>Firefox</option>
+                <option>Brave</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label for="maxQuality">Max quality</label>
+              <select id="maxQuality">
+                <option>Best</option>
+                <option>2160p</option>
+                <option>1440p</option>
+                <option>1080p</option>
+                <option>720p</option>
+                <option>480p</option>
+              </select>
+            </div>
+            <div class="field-row field-row-wide">
+              <label for="proxyInput">Proxy</label>
+              <input id="proxyInput" type="url" inputmode="url" placeholder="Optional">
+            </div>
+            <div class="field-row">
+              <label for="douyinEngine">Douyin engine</label>
+              <select id="douyinEngine" disabled>
+                <option>Auto</option>
+                <option>jiji262</option>
+                <option>SnapDouyin</option>
+                <option>yt-dlp</option>
+              </select>
+            </div>
+            <div class="field-row">
+              <label for="impersonate">Impersonate</label>
+              <select id="impersonate">
+                <option>Off</option>
+                <option>Chrome</option>
+                <option>Edge</option>
+                <option>Safari</option>
+                <option>Firefox</option>
+              </select>
+            </div>
+            <div class="toggle-row field-row-wide">
+              <label>
+                <input id="subtitlesToggle" type="checkbox" disabled>
+                <span>Subtitles</span>
+              </label>
+              <select id="subtitleLanguage" aria-label="Subtitle language" disabled>
+                <option value="all">All languages</option>
+              </select>
+            </div>
+            <div class="toggle-row field-row-wide">
+              <label>
+                <input id="metadataToggle" type="checkbox" disabled>
+                <span>Metadata</span>
+              </label>
+              <label>
+                <input id="thumbnailToggle" type="checkbox" disabled>
+                <span>Thumbnail</span>
+              </label>
+            </div>
+          </div>
+        </details>
+
+        <button id="downloadButton" class="primary-button download-button" type="button">
+          <i data-lucide="download"></i>
+          <span>Download</span>
+        </button>
+      </section>
+
+      <section id="jobSection" class="job-section" aria-live="polite" hidden>
+        <div class="status-heading">
+          <div>
+            <p id="jobLabel">Downloading</p>
+            <strong id="jobPercent">0%</strong>
+          </div>
+          <span id="jobState">Queued</span>
+        </div>
+        <progress id="jobProgress" max="100" value="0">0%</progress>
+        <p id="jobError" class="field-error" role="alert" hidden></p>
+      </section>
+
+      <section id="completeSection" class="complete-section" hidden>
+        <div class="complete-heading">
+          <span class="success-icon"><i data-lucide="check"></i></span>
+          <div>
+            <h2>Download complete</h2>
+            <p id="fileName"></p>
+          </div>
+        </div>
+        <video id="videoPreview" controls playsinline hidden></video>
+        <audio id="audioPreview" controls hidden></audio>
+        <div class="action-row">
+          <button id="playButton" class="secondary-button" type="button">
+            <i data-lucide="play"></i>
+            <span>Play video</span>
+          </button>
+          <button id="saveButton" class="secondary-button" type="button">
+            <i data-lucide="save"></i>
+            <span>Save</span>
+          </button>
+          <button id="shareButton" class="secondary-button" type="button">
+            <i data-lucide="share-2"></i>
+            <span>Share</span>
+          </button>
+        </div>
+      </section>
+
+      <section class="history-section">
+        <div class="section-heading">
+          <h2><i data-lucide="history"></i>History</h2>
+          <button id="refreshHistoryButton" class="icon-button" type="button" aria-label="Refresh history" title="Refresh history">
+            <i data-lucide="refresh-cw"></i>
+          </button>
+        </div>
+        <div id="historyList" class="history-list">
+          <p class="empty-state">No downloads yet.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <span>Files are processed by your Pro Downloader server.</span>
+      <button id="settingsButton" type="button">Server settings</button>
+    </footer>
+  </div>
+
+  <dialog id="settingsDialog">
+    <form method="dialog">
+      <div class="dialog-heading">
+        <h2>Server settings</h2>
+        <button class="icon-button" value="cancel" aria-label="Close settings">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <label for="apiKeyInput">API key</label>
+      <input id="apiKeyInput" type="password" autocomplete="current-password">
+      <p>Use the same key shown by the server launcher.</p>
+      <button id="saveSettingsButton" class="primary-button" value="default">Save and reconnect</button>
+    </form>
+  </dialog>
+
+  <dialog id="installDialog">
+    <form method="dialog">
+      <div class="dialog-heading">
+        <h2>Install Pro Downloader</h2>
+        <button class="icon-button" value="cancel" aria-label="Close install instructions">
+          <i data-lucide="x"></i>
+        </button>
+      </div>
+      <ol>
+        <li>Open this page in Safari.</li>
+        <li>Tap the Share button.</li>
+        <li>Choose Add to Home Screen.</li>
+      </ol>
+      <button class="primary-button" value="default">Done</button>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>
