@@ -19,10 +19,12 @@ from .core import (
     AdvancedOptions,
     cleanup_temp_files,
     download_media,
+    fetch_channel_videos,
     fetch_video_info,
     find_history_entry,
     find_ffmpeg_location,
     friendly_error,
+    is_channel_or_playlist_url,
     is_douyin_url,
     is_frozen_app,
     load_history,
@@ -33,6 +35,7 @@ from .core import (
     validate_url_input,
     yt_dlp_command,
 )
+
 
 
 class ProDownloaderApp:
@@ -56,7 +59,12 @@ class ProDownloaderApp:
         self.subtitles = BooleanVar(value=False)
         self.metadata = BooleanVar(value=False)
         self.thumbnail = BooleanVar(value=False)
+        self.channel_url_var = StringVar(value="")
+        self.channel_limit_var = StringVar(value="30")
+        self.channel_keyword_var = StringVar(value="")
+        self.channel_items: list[dict[str, object]] = []
         self.download_dir = Path.home() / "Downloads" / APP_NAME
+
         self.events: queue.Queue[tuple[str, object]] = queue.Queue()
         self.items: dict[str, dict[str, object]] = {}
         self.fetch_in_progress = False
@@ -152,11 +160,15 @@ class ProDownloaderApp:
         tabs = ttk.Notebook(outer)
         tabs.grid(row=6, column=0, sticky="ew", pady=(10, 0))
         advanced_tab = ttk.Frame(tabs, padding=8)
+        channel_tab = ttk.Frame(tabs, padding=8)
         history_tab = ttk.Frame(tabs, padding=8)
         tabs.add(advanced_tab, text="Advanced Options")
+        tabs.add(channel_tab, text="Channel / Batch Extractor")
         tabs.add(history_tab, text="History")
         self._build_advanced_tab(advanced_tab)
+        self._build_channel_tab(channel_tab)
         self._build_history_tab(history_tab)
+
 
         ttk.Label(outer, textvariable=self.status).grid(row=7, column=0, sticky="w", pady=(10, 0))
         self.table.bind("<<TreeviewSelect>>", self.on_selection_changed)
@@ -228,7 +240,158 @@ class ProDownloaderApp:
             self.update_nightly_button.configure(state="disabled")
         self.update_advanced_control_states()
 
+    def _build_channel_tab(self, frame: ttk.Frame) -> None:
+        frame.columnconfigure(0, weight=1)
+        frame.rowconfigure(1, weight=1)
+
+        top_frame = ttk.Frame(frame)
+        top_frame.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        top_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(top_frame, text="Channel/Playlist URL:").grid(row=0, column=0, sticky="w")
+        self.channel_url_entry = ttk.Entry(top_frame, textvariable=self.channel_url_var)
+        self.channel_url_entry.grid(row=0, column=1, sticky="ew", padx=(4, 10))
+
+        ttk.Label(top_frame, text="Limit:").grid(row=0, column=2, sticky="w")
+        self.channel_limit_box = ttk.Combobox(
+            top_frame,
+            textvariable=self.channel_limit_var,
+            width=6,
+            state="readonly",
+            values=["10", "20", "30", "50", "100", "All"],
+        )
+        self.channel_limit_box.grid(row=0, column=3, padx=(4, 10), sticky="w")
+
+        ttk.Label(top_frame, text="Filter:").grid(row=0, column=4, sticky="w")
+        self.channel_keyword_entry = ttk.Entry(top_frame, textvariable=self.channel_keyword_var, width=15)
+        self.channel_keyword_entry.grid(row=0, column=5, padx=(4, 10), sticky="w")
+
+        ttk.Button(top_frame, text="Fetch Channel Videos", command=self.fetch_channel_videos_ui).grid(
+            row=0, column=6, sticky="e"
+        )
+
+        table_frame = ttk.Frame(frame)
+        table_frame.grid(row=1, column=0, sticky="nsew")
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+
+        columns = ("select", "title", "uploader", "duration", "url")
+        self.channel_table = ttk.Treeview(table_frame, columns=columns, show="headings", height=5)
+        self.channel_table.heading("select", text="[x]")
+        self.channel_table.heading("title", text="Title")
+        self.channel_table.heading("uploader", text="Uploader")
+        self.channel_table.heading("duration", text="Duration")
+        self.channel_table.heading("url", text="URL")
+        self.channel_table.column("select", width=50, anchor="center")
+        self.channel_table.column("title", width=380)
+        self.channel_table.column("uploader", width=140)
+        self.channel_table.column("duration", width=90, anchor="center")
+        self.channel_table.column("url", width=320)
+        self.channel_table.grid(row=0, column=0, sticky="nsew")
+
+        scroll_y = ttk.Scrollbar(table_frame, orient="vertical", command=self.channel_table.yview)
+        self.channel_table.configure(yscrollcommand=scroll_y.set)
+        scroll_y.grid(row=0, column=1, sticky="ns")
+
+        self.channel_table.bind("<Button-1>", self.on_channel_table_click)
+
+        btn_frame = ttk.Frame(frame)
+        btn_frame.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        ttk.Button(btn_frame, text="Select All", command=self.channel_select_all).grid(row=0, column=0, sticky="w", padx=(0, 4))
+        ttk.Button(btn_frame, text="Deselect All", command=self.channel_deselect_all).grid(row=0, column=1, sticky="w", padx=4)
+        ttk.Button(btn_frame, text="Add Selected to Download Queue", command=self.add_channel_selected_to_queue).grid(
+            row=0, column=2, sticky="e", padx=(10, 0)
+        )
+
+    def fetch_channel_videos_ui(self) -> None:
+        url = self.channel_url_var.get().strip()
+        if not url:
+            messagebox.showinfo("Channel URL Required", "Please enter a YouTube channel/playlist or Douyin user URL.")
+            return
+
+        limit_str = self.channel_limit_var.get().strip().lower()
+        limit = 0 if limit_str == "all" else (int(limit_str) if limit_str.isdigit() else 30)
+        keyword = self.channel_keyword_var.get().strip()
+
+        self.status.set("Fetching channel videos...")
+        self.details.set(f"Scanning channel '{url}' for videos...")
+        threading.Thread(
+            target=self._channel_fetch_worker, args=(url, limit, keyword, self.advanced_options()), daemon=True
+        ).start()
+
+    def _channel_fetch_worker(self, url: str, limit: int, keyword: str, advanced: AdvancedOptions) -> None:
+        try:
+            items = fetch_channel_videos(url, limit=limit, keyword=keyword, advanced=advanced)
+            self.events.put(("channel_fetch_done", items))
+        except Exception as exc:
+            log_event(f"UI channel fetch error url={url} error={exc}")
+            self.events.put(("channel_fetch_error", friendly_error(str(exc))))
+
+    def _populate_channel_table(self, items: list[dict[str, Any]]) -> None:
+        self.channel_table.delete(*self.channel_table.get_children())
+        for idx, item in enumerate(items):
+            dur = format_duration(item.get("duration")) if isinstance(item.get("duration"), (int, float)) else str(item.get("duration") or "--:--")
+            self.channel_table.insert(
+                "",
+                "end",
+                iid=f"channel-item-{idx}",
+                values=(
+                    "[x]",
+                    item.get("title", ""),
+                    item.get("uploader", ""),
+                    dur,
+                    item.get("url", ""),
+                ),
+            )
+
+    def on_channel_table_click(self, event: object) -> None:
+        region = self.channel_table.identify("region", event.x, event.y)
+        if region == "cell":
+            column = self.channel_table.identify_column(event.x)
+            if column == "#1":
+                item_id = self.channel_table.identify_row(event.y)
+                if item_id:
+                    vals = list(self.channel_table.item(item_id, "values"))
+                    vals[0] = "[ ]" if vals[0] == "[x]" else "[x]"
+                    self.channel_table.item(item_id, values=vals)
+
+    def channel_select_all(self) -> None:
+        for item_id in self.channel_table.get_children():
+            vals = list(self.channel_table.item(item_id, "values"))
+            vals[0] = "[x]"
+            self.channel_table.item(item_id, values=vals)
+
+    def channel_deselect_all(self) -> None:
+        for item_id in self.channel_table.get_children():
+            vals = list(self.channel_table.item(item_id, "values"))
+            vals[0] = "[ ]"
+            self.channel_table.item(item_id, values=vals)
+
+    def add_channel_selected_to_queue(self) -> None:
+        selected_urls = []
+        for item_id in self.channel_table.get_children():
+            vals = self.channel_table.item(item_id, "values")
+            if vals and vals[0] == "[x]" and len(vals) >= 5:
+                selected_urls.append(vals[4])
+
+        if not selected_urls:
+            messagebox.showinfo("No Videos Selected", "Please check at least one video in the table.")
+            return
+
+        current_text = self.url_text.get("1.0", END).strip()
+        new_text = "\n".join(selected_urls)
+        if current_text:
+            combined = current_text + "\n" + new_text
+        else:
+            combined = new_text
+
+        self.url_text.delete("1.0", END)
+        self.url_text.insert("1.0", combined)
+        self.fetch_all()
+        messagebox.showinfo("Added to Queue", f"Added {len(selected_urls)} video(s) to the download queue!")
+
     def _build_history_tab(self, frame: ttk.Frame) -> None:
+
         frame.columnconfigure(0, weight=1)
         self.history_table = ttk.Treeview(frame, columns=("title", "format", "provider", "date", "file"), show="headings", height=5)
         self.history_table.heading("title", text="Title")
@@ -784,11 +947,23 @@ class ProDownloaderApp:
             self.details.set(str(payload))
         elif event == "history_refresh":
             self.refresh_history()
+        elif event == "channel_fetch_done":
+            items = list(payload) if isinstance(payload, list) else []
+            self.channel_items = items
+            self._populate_channel_table(items)
+            self.status.set(f"Channel fetch completed. Found {len(items)} video(s).")
+            self.details.set(f"Fetched {len(items)} video(s). Tích chọn các video cần tải và bấm 'Add Selected to Download Queue'.")
+        elif event == "channel_fetch_error":
+            err_msg = str(payload)
+            self.status.set("Channel fetch failed.")
+            self.details.set(err_msg)
+            messagebox.showerror("Channel Fetch Error", err_msg)
         elif event == "status":
             self.status.set(str(payload))
         elif event == "fetch_done":
             self.fetch_in_progress = False
         self.on_selection_changed()
+
 
     def _update_row(self, item_id: str) -> None:
         item = self.items[item_id]

@@ -202,7 +202,8 @@ def download_with_jiji262(
         result = asyncio.run(run())
 
     if not result or getattr(result, "success", 0) < 1:
-        raise RuntimeError("jiji262 engine did not download a video. Set up Douyin cookies, then retry.")
+        raise RuntimeError("jiji262 engine did not download a video. Douyin requires browser cookies; select a Cookie Browser (Chrome/Edge/Firefox) in Advanced Options.")
+
 
     new_file = find_new_media_file(download_dir, before)
     if not new_file:

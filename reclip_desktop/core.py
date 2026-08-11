@@ -352,10 +352,27 @@ def sanitize_filename(title: str, extension: str, max_length: int = 80) -> str:
     return f"{safe_title[:max_length].strip()}{extension}"
 
 
+def strip_ansi_codes(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;]*[mGKH]", "", text).strip()
+
+
 def friendly_error(error: str) -> str:
-    if "Douyin" in error and "Fresh cookies" in error:
-        return "Douyin needs fresh browser cookies. Open the video once in Chrome or Edge, pass any check, then retry."
-    lowered = error.lower()
+    clean_err = strip_ansi_codes(error)
+    lowered = clean_err.lower()
+    if (
+        "douyin" in lowered
+        or "jiji262" in lowered
+        or "aweme" in lowered
+    ) and (
+        "fresh cookies" in lowered
+        or "anti-bot" in lowered
+        or "set up douyin cookies" in lowered
+        or "did not download" in lowered
+        or "cookie" in lowered
+    ):
+        return "Douyin requires browser cookies. Please select a Cookie Browser (Chrome/Edge/Firefox) in Advanced Options."
+
+
     if (
         "did not return media" in lowered
         or "did not return downloadable media" in lowered
@@ -386,6 +403,7 @@ def friendly_error(error: str) -> str:
     if "network" in error.lower():
         return "Network error - check your connection"
     return error[:80] + "..." if len(error) > 80 else error
+
 
 
 def fetch_video_info(
@@ -506,13 +524,29 @@ def fetch_info_with_ytdlp_api(
 ) -> dict[str, Any]:
     import yt_dlp
 
-    options = ytdlp_base_api_options(cookie_browser=cookie_browser, advanced=advanced)
-    options["skip_download"] = True
-    with yt_dlp.YoutubeDL(options) as ydl:
-        info = ydl.extract_info(url, download=False)
-    if not isinstance(info, dict):
-        raise RuntimeError("yt-dlp API did not return metadata")
-    return info
+    requested_cookie = cookie_browser or (advanced.yt_dlp_cookie_browser() if advanced else None)
+    browsers = [requested_cookie] if requested_cookie else [None]
+    if is_douyin_url(url) and not cookie_browser:
+        browsers.extend(auto_cookie_browsers())
+
+    last_exc = None
+    for b in browsers:
+        try:
+            options = ytdlp_base_api_options(cookie_browser=b, advanced=advanced)
+            options["skip_download"] = True
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=False)
+            if isinstance(info, dict):
+                if b:
+                    log_event(f"INFO api cookie ok url={url} browser={b}")
+                return info
+        except Exception as exc:
+            last_exc = exc
+            log_event(f"INFO api error url={url} browser={b or 'none'} error={exc}")
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("yt-dlp API did not return metadata")
+
 
 
 def ytdlp_base_api_options(cookie_browser: str | None = None, advanced: AdvancedOptions | None = None) -> dict[str, Any]:
@@ -541,6 +575,8 @@ def safe_log_snippet(text: str, limit: int = 240) -> str:
 def should_fetch_douyin_provider_first(advanced: AdvancedOptions | None) -> bool:
     engine = (advanced or AdvancedOptions()).normalized_douyin_engine()
     return engine in {"auto", "jiji262", "snapdouyin"}
+
+
 
 
 def fetch_info_result_with_auto_cookies(
@@ -611,22 +647,8 @@ def download_media(
             log_event(f"JIJI262 fallback url={url} error={exc}")
             if douyin_engine == "jiji262":
                 raise
-            if format_id == "jiji262-local":
-                provider_info = fetch_douyin_provider_info(url, timeout=min(timeout, 60))
-                video_formats = [fmt for fmt in provider_info.get("formats", []) if fmt.get("media_format") == "video"]
-                if video_formats:
-                    return download_snapdouyin_media(
-                        url,
-                        download_dir,
-                        job_id,
-                        title or str(provider_info.get("title") or ""),
-                        timeout,
-                        progress_callback,
-                        str(video_formats[0]["id"]),
-                        media_format,
-                        provider_info=provider_info,
-                    )
-                format_id = None
+            format_id = None
+
     if media_format == "video" and is_douyin_url(url) and douyin_engine == "yt-dlp" and format_id and format_id.startswith("snapdouyin-"):
         format_id = None
 
@@ -642,7 +664,12 @@ def download_media(
 
             return download_with_jiji262(url, download_dir, advanced=advanced, progress_callback=progress_callback)
         if format_id and format_id.startswith("snapdouyin-"):
-            return download_snapdouyin_media(url, download_dir, job_id, title, timeout, progress_callback, format_id, media_format)
+            try:
+                return download_snapdouyin_media(url, download_dir, job_id, title, timeout, progress_callback, format_id, media_format)
+            except Exception as exc:
+                log_event(f"SNAPDOUYIN download failed url={url} format_id={format_id} error={exc}, falling back to yt-dlp")
+                format_id = None
+
 
     if media_format == "video" and is_tiktok_url(url) and is_provider_format_id(format_id):
         if format_id == "tikmate":
@@ -811,54 +838,71 @@ def download_with_ytdlp_api(
 ) -> Path:
     import yt_dlp
 
+    requested_cookie = cookie_browser or (advanced.yt_dlp_cookie_browser() if advanced else None)
+    browsers = [requested_cookie] if requested_cookie else [None]
+    if is_douyin_url(url) and not cookie_browser:
+        browsers.extend(auto_cookie_browsers())
+
     output_template = str(download_dir / f"{job_id}.%(ext)s")
-    options = ytdlp_base_api_options(cookie_browser=cookie_browser, advanced=advanced)
-    options.update(
-        {
-            "outtmpl": output_template,
-            "progress_hooks": [ytdlp_api_progress_hook(progress_callback)] if progress_callback else [],
-            "ignoreerrors": False,
-        }
-    )
-    if archive_file:
-        archive_file.parent.mkdir(parents=True, exist_ok=True)
-        options["download_archive"] = str(archive_file)
-    ffmpeg = find_ffmpeg_location()
-    if ffmpeg:
-        options["ffmpeg_location"] = ffmpeg
+    last_exc = None
 
-    advanced = advanced or AdvancedOptions(cookie_browser=cookie_browser or "Auto")
-    if media_format == "audio":
-        options["format"] = "bestaudio/best"
-        options["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
-    elif format_id and not is_provider_format_id(format_id):
-        options["format"] = f"{format_id}+bestaudio/{format_id}/bestvideo*+bestaudio/bestvideo*/best*[vcodec!=none]"
-        options["merge_output_format"] = "mp4"
-    else:
-        options["format"] = "bestvideo*+bestaudio/bestvideo*/best*[vcodec!=none]"
-        options["merge_output_format"] = "mp4"
+    for b in browsers:
+        options = ytdlp_base_api_options(cookie_browser=b, advanced=advanced)
+        options.update(
+            {
+                "outtmpl": output_template,
+                "progress_hooks": [ytdlp_api_progress_hook(progress_callback)] if progress_callback else [],
+                "ignoreerrors": False,
+            }
+        )
+        if archive_file:
+            archive_file.parent.mkdir(parents=True, exist_ok=True)
+            options["download_archive"] = str(archive_file)
+        ffmpeg = find_ffmpeg_location()
+        if ffmpeg:
+            options["ffmpeg_location"] = ffmpeg
 
-    if advanced.max_height():
-        options["format_sort"] = [f"res:{advanced.max_height()}"]
-    if advanced.subtitles:
-        options["writesubtitles"] = True
-        options["writeautomaticsub"] = True
-        options["subtitleslangs"] = [part.strip() for part in advanced.normalized_subtitle_languages().split(",") if part.strip()]
-    if advanced.metadata:
-        options["addmetadata"] = True
-        options["writeinfojson"] = True
-    if advanced.thumbnail:
-        options["writethumbnail"] = True
+        adv = advanced or AdvancedOptions(cookie_browser=b or "Auto")
+        if media_format == "audio":
+            options["format"] = "bestaudio/best"
+            options["postprocessors"] = [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}]
+        elif format_id and not is_provider_format_id(format_id):
+            options["format"] = f"{format_id}+bestaudio/{format_id}/bestvideo*+bestaudio/bestvideo*/best*[vcodec!=none]"
+            options["merge_output_format"] = "mp4"
+        else:
+            options["format"] = "bestvideo*+bestaudio/bestvideo*/best*[vcodec!=none]"
+            options["merge_output_format"] = "mp4"
 
-    log_event(f"DOWNLOAD api start job={job_id} media_format={media_format} format_id={format_id or ''} url={url}")
-    with yt_dlp.YoutubeDL(options) as ydl:
-        ydl.download([url])
+        if adv.max_height():
+            options["format_sort"] = [f"res:{adv.max_height()}"]
+        if adv.subtitles:
+            options["writesubtitles"] = True
+            options["writeautomaticsub"] = True
+            options["subtitleslangs"] = [part.strip() for part in adv.normalized_subtitle_languages().split(",") if part.strip()]
+        if adv.metadata:
+            options["addmetadata"] = True
+            options["writeinfojson"] = True
+        if adv.thumbnail:
+            options["writethumbnail"] = True
 
-    final_path = finalize_downloaded_job_file(download_dir, job_id, media_format, title)
-    if not final_path:
-        raise RuntimeError("Download completed but no file was found")
-    log_event(f"DOWNLOAD api done job={job_id} final={final_path}")
-    return final_path
+        log_event(f"DOWNLOAD api start job={job_id} media_format={media_format} format_id={format_id or ''} url={url} browser={b or 'none'}")
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                ydl.download([url])
+
+            final_path = finalize_downloaded_job_file(download_dir, job_id, media_format, title)
+            if final_path:
+                log_event(f"DOWNLOAD api done job={job_id} final={final_path}")
+                return final_path
+        except Exception as exc:
+            last_exc = exc
+            log_event(f"DOWNLOAD api error job={job_id} browser={b or 'none'} error={exc}")
+            continue
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Download completed but no file was found")
+
 
 
 def finalize_downloaded_job_file(download_dir: Path, job_id: str, media_format: str, title: str = "") -> Path | None:
@@ -1387,9 +1431,13 @@ def download_snapdouyin_media(
             )
             try:
                 assert_downloaded_file_has_expected_stream(temp_path, "audio" if extension in {"mp3", "m4a"} else "video")
-            except Exception:
+            except Exception as stream_exc:
+                probe_output = probe_media_streams(temp_path)
+                has_audio = "Audio:" in probe_output
+
                 thumbnail_url = str(info.get("thumbnail") or "")
-                if media_format == "video" and thumbnail_url:
+
+                if media_format == "video" and thumbnail_url and has_audio:
                     final_name = sanitize_filename(title or str(info.get("title") or ""), ".mp4")
                     final_path = unique_path(download_dir / final_name)
                     converted = create_still_video_from_audio(temp_path, thumbnail_url, final_path, timeout=timeout)
@@ -1399,7 +1447,10 @@ def download_snapdouyin_media(
                     if progress_callback:
                         progress_callback(100)
                     return converted
-                raise
+                raise RuntimeError(f"SnapDouyin downloaded file is invalid media: {stream_exc}")
+
+
+
             suffix = temp_path.suffix
             final_name = sanitize_filename(title or str(info.get("title") or ""), suffix)
             final_path = unique_path(download_dir / final_name)
@@ -1647,3 +1698,238 @@ def update_ytdlp(nightly: bool = False, timeout: int = 300) -> str:
     if result.returncode != 0:
         raise RuntimeError(last_error_line(output))
     return output[-1000:]
+
+
+def is_channel_or_playlist_url(url: str) -> bool:
+    url = url.strip()
+    parsed = urllib.parse.urlparse(url)
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+
+    if "youtube.com" in host or "youtu.be" in host:
+        if "@" in path or "/channel/" in path or "/c/" in path or "/user/" in path or "list=" in query:
+            return True
+    if "douyin.com" in host:
+        if "/user/" in path or "/user" in path:
+            return True
+        if "v.douyin.com" in host:
+            return True
+    return False
+
+
+def fetch_youtube_channel_videos(
+    url: str, limit: int = 30, advanced: AdvancedOptions | None = None
+) -> list[dict[str, Any]]:
+    import yt_dlp
+
+    options = ytdlp_base_api_options(advanced=advanced)
+    options.update(
+        {
+            "extract_flat": "in_playlist",
+            "playlistend": limit if limit > 0 else None,
+            "skip_download": True,
+        }
+    )
+    with yt_dlp.YoutubeDL(options) as ydl:
+        info = ydl.extract_info(url, download=False)
+    entries = info.get("entries") or []
+    results: list[dict[str, Any]] = []
+    uploader = info.get("uploader") or info.get("channel") or info.get("title") or "YouTube Channel"
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        video_id = item.get("id") or item.get("url")
+        if not video_id:
+            continue
+        video_url = item.get("url")
+        if not video_url or not str(video_url).startswith("http"):
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
+        results.append(
+            {
+                "id": str(video_id),
+                "url": str(video_url),
+                "title": str(item.get("title") or video_id),
+                "duration": item.get("duration"),
+                "uploader": str(item.get("uploader") or uploader),
+                "thumbnail": str(
+                    item.get("thumbnail")
+                    or (item.get("thumbnails", [{}])[0].get("url") if item.get("thumbnails") else "")
+                ),
+            }
+        )
+    return results
+
+
+def extract_douyin_sec_uid(url: str) -> str | None:
+    match = re.search(r"sec_uid=([^&]+)", url)
+    if match:
+        return match.group(1)
+    match2 = re.search(r"/user/([^/?#]+)", url)
+    if match2:
+        return match2.group(1)
+    return None
+
+
+def fetch_douyin_channel_videos(
+    url: str, limit: int = 30, advanced: AdvancedOptions | None = None
+) -> list[dict[str, Any]]:
+    sec_uid = extract_douyin_sec_uid(url)
+    if not sec_uid and is_douyin_url(url):
+        try:
+            req = urllib.request.Request(url, headers=HTTP_HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                sec_uid = extract_douyin_sec_uid(resp.geturl())
+        except Exception:
+            pass
+
+    if sec_uid:
+        cookies: dict[str, str] = {}
+        requested_browser = (advanced.yt_dlp_cookie_browser() if advanced else None) or "auto"
+        browsers_to_try = (
+            [requested_browser] if requested_browser not in {"auto", None} else ["firefox", "edge", "chrome", "brave"]
+        )
+
+        try:
+            import yt_dlp.cookies
+
+            for b in browsers_to_try:
+                try:
+                    cj = yt_dlp.cookies.extract_cookies_from_browser(b.lower())
+                    for cookie in cj:
+                        if "douyin" in cookie.domain or "amemv" in cookie.domain or "ecombd" in cookie.domain:
+                            cookies[cookie.name] = cookie.value
+                    if cookies:
+                        log_event(f"CHANNEL douyin cookies loaded browser={b} count={len(cookies)}")
+                        break
+                except Exception as exc:
+                    log_event(f"CHANNEL cookie extract error browser={b} error={exc}")
+        except Exception as exc:
+            log_event(f"CHANNEL cookie import error error={exc}")
+
+        try:
+            import asyncio
+            from .douyin_engine import vendor_path_context
+
+            with vendor_path_context():
+                from core.api_client import DouyinAPIClient
+
+            async def get_posts() -> list[dict[str, Any]]:
+                proxy = advanced.proxy.strip() if advanced else None
+                with vendor_path_context():
+                    async with DouyinAPIClient(cookies=cookies, proxy=proxy) as client:
+                        res = await client.get_user_post(sec_uid, count=max(20, limit if limit > 0 else 30), max_cursor=0)
+                aweme_list = res.get("aweme_list", [])
+
+                results: list[dict[str, Any]] = []
+                for item in aweme_list:
+                    if not isinstance(item, dict):
+                        continue
+                    aweme_id = str(item.get("aweme_id") or "")
+                    desc = str(item.get("desc") or aweme_id or "Douyin Video")
+                    author = str(item.get("author", {}).get("nickname") or "Douyin Creator")
+                    dur_val = item.get("duration") or (item.get("video", {}).get("duration") or 0) / 1000.0
+                    video_url = f"https://www.douyin.com/video/{aweme_id}" if aweme_id else ""
+                    thumbnail = ""
+                    video_dict = item.get("video", {})
+                    if isinstance(video_dict, dict):
+                        cover = video_dict.get("cover") or video_dict.get("origin_cover") or {}
+                        url_list = cover.get("url_list") or []
+                        if url_list:
+                            thumbnail = str(url_list[0])
+
+                    if video_url:
+                        results.append(
+                            {
+                                "id": aweme_id,
+                                "url": video_url,
+                                "title": desc,
+                                "duration": dur_val,
+                                "uploader": author,
+                                "thumbnail": thumbnail,
+                            }
+                        )
+                return results
+
+
+            results = asyncio.run(get_posts())
+            if results:
+                log_event(f"CHANNEL douyin APIClient success count={len(results)}")
+                return results
+        except Exception as exc:
+            log_event(f"CHANNEL douyin APIClient error url={url} error={exc}")
+
+    import yt_dlp
+
+    requested_cookie = advanced.yt_dlp_cookie_browser() if advanced else None
+    browsers = [requested_cookie] if requested_cookie else [None] + auto_cookie_browsers()
+
+    last_exc = None
+    for b in browsers:
+        try:
+            options = ytdlp_base_api_options(cookie_browser=b, advanced=advanced)
+            options.update(
+                {
+                    "extract_flat": "in_playlist",
+                    "playlistend": limit if limit > 0 else None,
+                    "skip_download": True,
+                }
+            )
+            with yt_dlp.YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=False)
+            entries = info.get("entries") or []
+            if entries:
+                uploader = info.get("uploader") or info.get("title") or "Douyin User"
+                results: list[dict[str, Any]] = []
+                for item in entries:
+                    if not isinstance(item, dict):
+                        continue
+                    vid = str(item.get("id") or "")
+                    vurl = str(item.get("url") or (f"https://www.douyin.com/video/{vid}" if vid else ""))
+                    if not vurl:
+                        continue
+                    results.append(
+                        {
+                            "id": vid or vurl,
+                            "url": vurl,
+                            "title": str(item.get("title") or vid or "Douyin Video"),
+                            "duration": item.get("duration"),
+                            "uploader": str(item.get("uploader") or uploader),
+                            "thumbnail": str(item.get("thumbnail") or ""),
+                        }
+                    )
+                if results:
+                    return results
+        except Exception as exc:
+            last_exc = exc
+            log_event(f"INFO channel fetch error url={url} browser={b or 'none'} error={exc}")
+
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("Could not fetch channel videos for this Douyin link. Cookies might be required.")
+
+
+
+def fetch_channel_videos(
+    url: str,
+    limit: int = 30,
+    keyword: str = "",
+    advanced: AdvancedOptions | None = None,
+) -> list[dict[str, Any]]:
+    url = normalize_url(url)
+    log_event(f"CHANNEL fetch start url={url} limit={limit} keyword={keyword}")
+    if is_douyin_url(url):
+        items = fetch_douyin_channel_videos(url, limit=limit, advanced=advanced)
+    else:
+        items = fetch_youtube_channel_videos(url, limit=limit, advanced=advanced)
+
+    if keyword.strip():
+        kw = keyword.strip().lower()
+        items = [item for item in items if kw in item.get("title", "").lower()]
+
+    if limit > 0:
+        items = items[:limit]
+
+    log_event(f"CHANNEL fetch done url={url} found={len(items)}")
+    return items
+

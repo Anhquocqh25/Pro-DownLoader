@@ -18,8 +18,10 @@ from reclip_desktop.core import (
     download_snapdouyin_media,
     extract_subtitle_languages,
     extract_urls,
+    fetch_channel_videos,
     finalize_downloaded_job_file,
     friendly_error,
+    is_channel_or_playlist_url,
     is_douyin_url,
     APP_NAME,
     normalize_url,
@@ -34,6 +36,7 @@ from reclip_desktop.core import (
     validate_known_video_url,
     validate_url_input,
 )
+
 
 
 class CoreTests(unittest.TestCase):
@@ -87,6 +90,12 @@ class CoreTests(unittest.TestCase):
             "Invalid link or video not found. Check that the URL is complete and the video is public.",
         )
 
+    def test_friendly_error_identifies_douyin_cookie_anti_bot_error(self):
+        self.assertIn("Douyin requires browser cookies", friendly_error("ERROR: [Douyin] Fresh cookies (not necessarily logged in) are needed"))
+        self.assertIn("Douyin requires browser cookies", friendly_error("jiji262 engine did not download a video. Douyin requires browser cookies"))
+
+
+
     def test_update_ytdlp_refuses_frozen_app_self_update(self):
         with patch("reclip_desktop.core.is_frozen_app", return_value=True):
             with self.assertRaises(RuntimeError):
@@ -102,6 +111,24 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(is_douyin_url("https://v.douyin.com/vL0Sq6GP7Yk/"))
         self.assertTrue(is_douyin_url("https://www.douyin.com/video/7621183643477642536"))
         self.assertFalse(is_douyin_url("https://www.tiktok.com/@user/video/123"))
+
+    def test_is_channel_or_playlist_url(self):
+        self.assertTrue(is_channel_or_playlist_url("https://www.youtube.com/@channelname/videos"))
+        self.assertTrue(is_channel_or_playlist_url("https://www.youtube.com/playlist?list=PL12345"))
+        self.assertTrue(is_channel_or_playlist_url("https://www.douyin.com/user/MS4wLjABAAAA123"))
+        self.assertFalse(is_channel_or_playlist_url("https://www.youtube.com/watch?v=12345"))
+
+    def test_fetch_channel_videos_filters_by_keyword_and_limit(self):
+        mock_items = [
+            {"id": "1", "url": "https://www.youtube.com/watch?v=1", "title": "Python Tutorial 1", "uploader": "Dev"},
+            {"id": "2", "url": "https://www.youtube.com/watch?v=2", "title": "Java Guide", "uploader": "Dev"},
+            {"id": "3", "url": "https://www.youtube.com/watch?v=3", "title": "Python Advanced", "uploader": "Dev"},
+        ]
+        with patch("reclip_desktop.core.fetch_youtube_channel_videos", return_value=mock_items):
+            res = fetch_channel_videos("https://www.youtube.com/@Dev/videos", limit=1, keyword="python")
+            self.assertEqual(len(res), 1)
+            self.assertEqual(res[0]["title"], "Python Tutorial 1")
+
 
     def test_select_formats_keeps_best_bitrate_per_height(self):
         info = {
@@ -399,8 +426,10 @@ class CoreTests(unittest.TestCase):
         with (
             patch("reclip_desktop.core.download_url_to_file") as download_file,
             patch("reclip_desktop.core.assert_downloaded_file_has_expected_stream", side_effect=ValueError("no video")),
+            patch("reclip_desktop.core.probe_media_streams", return_value="Stream #0:0: Audio: aac"),
             patch("reclip_desktop.core.create_still_video_from_audio", return_value=expected_path) as create_still_video,
         ):
+
             result = download_snapdouyin_media(
                 url="https://www.douyin.com/video/123",
                 download_dir=Path("downloads"),
@@ -602,8 +631,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(friendly_error("ERROR: Unsupported URL: nope"), "This URL is not supported")
         self.assertEqual(
             friendly_error("ERROR: [Douyin] 7621183643477642536: Fresh cookies (not necessarily logged in) are needed"),
-            "Douyin needs fresh browser cookies. Open the video once in Chrome or Edge, pass any check, then retry.",
+            "Douyin requires browser cookies. Please select a Cookie Browser (Chrome/Edge/Firefox) in Advanced Options.",
         )
+
         self.assertEqual(friendly_error("x" * 90), "x" * 80 + "...")
 
 
