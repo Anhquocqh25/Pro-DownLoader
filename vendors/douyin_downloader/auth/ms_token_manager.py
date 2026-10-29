@@ -9,7 +9,10 @@ from http.cookies import SimpleCookie
 from threading import Lock
 from typing import Any, Dict, Optional
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 from utils.logger import setup_logger
 
@@ -107,6 +110,9 @@ class MsTokenManager:
         with self._lock:
             if self._cached_conf and (now - self._cached_at) < self._cache_ttl_seconds:
                 return self._cached_conf
+
+        if not yaml:
+            return None
 
         try:
             with urllib.request.urlopen(self.conf_url, timeout=self.timeout_seconds) as resp:

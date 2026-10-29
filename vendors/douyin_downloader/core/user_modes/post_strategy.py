@@ -68,7 +68,7 @@ class PostUserModeStrategy(BaseUserModeStrategy):
                     aweme_list = aweme_list[:number_limit]
                     break
 
-        if pagination_restricted:
+        if not aweme_list or pagination_restricted:
             self.downloader._progress_update_step("拉取作品列表", "分页受限，尝试浏览器回补")
             await self.downloader._recover_user_post_with_browser(sec_uid, user_info, aweme_list)
             if not aweme_list:

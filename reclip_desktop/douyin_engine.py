@@ -23,12 +23,15 @@ def engine_cookie_file() -> Path:
 
 
 class CallbackProgressReporter:
-    def __init__(self, progress_callback: Callable[[int], None] | None = None) -> None:
+    def __init__(self, progress_callback: Callable[[int], None] | None = None, cancel_event: Any = None) -> None:
         self.progress_callback = progress_callback
+        self.cancel_event = cancel_event
         self._progress = 5
         self._emit(self._progress)
 
     def _emit(self, value: int) -> None:
+        if self.cancel_event and getattr(self.cancel_event, "is_set", lambda: False)():
+            raise RuntimeError("Download cancelled by user.")
         self._progress = max(self._progress, min(99, value))
         if self.progress_callback:
             self.progress_callback(self._progress)
@@ -169,7 +172,10 @@ def download_with_jiji262(
     download_dir: Path,
     advanced: AdvancedOptions | None = None,
     progress_callback: Callable[[int], None] | None = None,
+    cancel_event: Any = None,
 ) -> Path:
+    if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+        raise RuntimeError("Download cancelled by user.")
     ensure_vendor_available()
     download_dir.mkdir(parents=True, exist_ok=True)
     before = snapshot_media_files(download_dir)
@@ -196,7 +202,7 @@ def download_with_jiji262(
                 loader,
                 cookie_manager,
                 database=None,
-                progress_reporter=CallbackProgressReporter(progress_callback),
+                progress_reporter=CallbackProgressReporter(progress_callback, cancel_event=cancel_event),
             )
 
         result = asyncio.run(run())
@@ -294,3 +300,164 @@ def write_setup_cookie_bat(command: list[str]) -> Path:
 def quote_bat_arg(value: str) -> str:
     escaped = value.replace('"', '\\"')
     return f'"{escaped}"'
+
+
+class ChannelProgressReporter:
+    def __init__(self, progress_callback: Callable[[int, str], None] | None = None) -> None:
+        self.progress_callback = progress_callback
+        self.author_nickname = "Douyin Creator"
+        self.item_total = 0
+        self.completed_items = 0
+        self.success_count = 0
+        self.failed_count = 0
+        self.skipped_count = 0
+        self._emit(5, "Đang khởi tạo engine...")
+
+    def _emit(self, percent: int, msg: str = "") -> None:
+        if self.progress_callback:
+            try:
+                self.progress_callback(max(1, min(100, int(percent))), msg)
+            except Exception:
+                pass
+
+    def on_author(self, nickname: str | None = None, sec_uid: str | None = None) -> None:
+        if nickname:
+            self.author_nickname = str(nickname)
+            self._emit(15, f"Kênh tác giả: {self.author_nickname}")
+
+    def advance_step(self, step: str, detail: str = "") -> None:
+        self._emit(20, f"{step}: {detail}")
+
+    def update_step(self, step: str, detail: str = "") -> None:
+        self._emit(25, f"{step}: {detail}")
+
+    def set_item_total(self, total: int, detail: str = "") -> None:
+        self.item_total = max(1, total)
+        self._emit(30, f"Tìm thấy {self.item_total} video. Đang tải...")
+
+    def advance_item(self, status: str, detail: str = "") -> None:
+        self.completed_items += 1
+        if status == "success":
+            self.success_count += 1
+        elif status == "skipped":
+            self.skipped_count += 1
+        else:
+            self.failed_count += 1
+
+        total = max(1, self.item_total)
+        pct = 30 + int((self.completed_items / total) * 68)
+        status_label = "Thành công" if status == "success" else ("Bỏ qua (đã có)" if status == "skipped" else "Lỗi")
+        msg = f"[{self.completed_items}/{self.item_total}] {status_label}: {detail}"
+        self._emit(pct, msg)
+
+
+def build_channel_engine_config(
+    url: str,
+    download_dir: Path,
+    advanced: AdvancedOptions | None = None,
+    limit: int = 0,
+) -> dict[str, Any]:
+    advanced = advanced or AdvancedOptions()
+    max_quality = advanced.max_quality if advanced.max_quality and advanced.max_quality != "Best" else "highest"
+    return {
+        "path": str(download_dir),
+        "link": [normalize_url(url)],
+        "thread": 3,
+        "retry_times": 3,
+        "rate_limit": 1.5,
+        "proxy": advanced.proxy.strip(),
+        "video_quality": max_quality,
+        "folderstyle": True,
+        "filename_template": "{title}_{id}",
+        "folder_template": "{nickname}",
+        "music": False,
+        "cover": bool(advanced.thumbnail),
+        "avatar": False,
+        "json": bool(advanced.metadata),
+        "database": True,
+        "auto_cookie": True,
+        "transcript": {"enabled": False},
+        "comments": {"enabled": False},
+        "browser_fallback": {
+            "enabled": True,
+            "headless": True,
+            "max_scrolls": 80,
+            "idle_rounds": 5,
+            "wait_timeout_seconds": 45,
+        },
+        "mode": ["post"],
+        "number": {"post": max(0, limit)},
+    }
+
+
+def download_channel_with_jiji262(
+    url: str,
+    download_dir: Path,
+    advanced: AdvancedOptions | None = None,
+    limit: int = 0,
+    progress_callback: Callable[[int, str], None] | None = None,
+) -> dict[str, Any]:
+    ensure_vendor_available()
+    download_dir.mkdir(parents=True, exist_ok=True)
+    config = build_channel_engine_config(url, download_dir, advanced, limit=limit)
+    config_path = write_engine_config(config, ENGINE_DATA_DIR / "config_channel.yml")
+    reporter = ChannelProgressReporter(progress_callback)
+    log_event(f"JIJI262 channel start url={url} limit={limit} config={config_path}")
+
+    with vendor_path_context():
+        from auth import CookieManager  # type: ignore
+        from cli.main import download_url  # type: ignore
+        from config import ConfigLoader  # type: ignore
+        from storage import Database  # type: ignore
+
+        async def run() -> Any:
+            loader = ConfigLoader(str(config_path))
+            cookie_file = str(engine_cookie_file())
+            cookie_manager = CookieManager(cookie_file=cookie_file)
+            initial_cookies = loader.get_cookies()
+            if initial_cookies:
+                cookie_manager.set_cookies(initial_cookies)
+            else:
+                cookie_manager.get_cookies()
+
+            db_path = str(DATA_DIR / "douyin.db")
+            db = Database(db_path)
+            await db.initialize()
+
+            try:
+                return await download_url(
+                    normalize_url(url),
+                    loader,
+                    cookie_manager,
+                    database=db,
+                    progress_reporter=reporter,
+                )
+            finally:
+                await db.close()
+
+        result = asyncio.run(run())
+
+    reporter._emit(100, f"Hoàn tất tải kênh! Đã xử lý {reporter.completed_items} video.")
+    log_event(f"JIJI262 channel done url={url} author={reporter.author_nickname} success={reporter.success_count} skipped={reporter.skipped_count}")
+    return {
+        "total": getattr(result, "total", reporter.item_total),
+        "success": getattr(result, "success", reporter.success_count),
+        "failed": getattr(result, "failed", reporter.failed_count),
+        "skipped": getattr(result, "skipped", reporter.skipped_count),
+        "author": reporter.author_nickname,
+        "download_dir": str(download_dir),
+    }
+
+
+def save_douyin_cookie_string(cookie_str: str) -> Path:
+    cookies: dict[str, str] = {}
+    for part in cookie_str.split(";"):
+        part = part.strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            cookies[k.strip()] = v.strip()
+    cfile = engine_cookie_file()
+    cfile.parent.mkdir(parents=True, exist_ok=True)
+    cfile.write_text(json.dumps(cookies, ensure_ascii=False, indent=2), encoding="utf-8")
+    return cfile
+

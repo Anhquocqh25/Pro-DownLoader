@@ -6,7 +6,10 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import yaml
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 from utils.cookie_utils import parse_cookie_header, sanitize_cookies
 
@@ -26,7 +29,13 @@ class ConfigLoader:
 
         if self.config_path and os.path.exists(self.config_path):
             with open(self.config_path, "r", encoding="utf-8") as f:
-                file_config = yaml.safe_load(f) or {}
+                if yaml is not None:
+                    file_config = yaml.safe_load(f) or {}
+                else:
+                    try:
+                        file_config = json.load(f) or {}
+                    except Exception:
+                        file_config = {}
                 config = self._merge_config(config, file_config)
                 override_sources.append(file_config)
 
@@ -201,10 +210,10 @@ class ConfigLoader:
         if target.exists():
             try:
                 with open(target, "r", encoding="utf-8") as handle:
-                    loaded = yaml.safe_load(handle)
+                    loaded = yaml.safe_load(handle) if yaml is not None else json.load(handle)
                 if isinstance(loaded, dict):
                     existing = loaded
-            except (yaml.YAMLError, OSError) as exc:
+            except Exception as exc:
                 logger.warning(
                     "Failed to read existing config %s for merge: %s; "
                     "falling back to UI-only snapshot",
@@ -226,7 +235,10 @@ class ConfigLoader:
 
         try:
             with open(target, "w", encoding="utf-8") as handle:
-                yaml.safe_dump(existing, handle, allow_unicode=True, sort_keys=False)
+                if yaml is not None:
+                    yaml.safe_dump(existing, handle, allow_unicode=True, sort_keys=False)
+                else:
+                    json.dump(existing, handle, ensure_ascii=False, indent=2)
         except OSError as exc:
             logger.warning("Failed to write config %s: %s", target, exc)
             return False

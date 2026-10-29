@@ -190,13 +190,16 @@ def validate_url_input(text: str) -> tuple[list[str], str | None]:
 
 
 def normalize_url(url: str) -> str:
-    parsed = urllib.parse.urlparse(url.strip())
+    raw = url.strip()
+    if raw and not raw.startswith(("http://", "https://")):
+        raw = "https://" + raw
+    parsed = urllib.parse.urlparse(raw)
     host = parsed.netloc.lower()
     query = urllib.parse.parse_qs(parsed.query)
     modal_id = (query.get("modal_id") or [""])[0]
     if "douyin.com" in host and modal_id.isdigit():
         return f"https://www.douyin.com/video/{modal_id}"
-    return url.strip()
+    return raw
 
 
 def select_formats(info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -314,6 +317,37 @@ def append_cookie_args(command: list[str], cookie_browser: str | None) -> list[s
 
 
 def auto_cookie_browsers() -> list[str]:
+    return list(SUPPORTED_COOKIE_BROWSERS)
+
+
+def installed_cookie_browsers() -> list[str]:
+    if os.name == "nt":
+        local_app = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+        app_data = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+        browser_paths = {
+            "chrome": local_app / "Google" / "Chrome" / "User Data",
+            "edge": local_app / "Microsoft" / "Edge" / "User Data",
+            "brave": local_app / "BraveSoftware" / "Brave-Browser" / "User Data",
+            "firefox": app_data / "Mozilla" / "Firefox" / "Profiles",
+        }
+        valid_browsers = []
+        for b in SUPPORTED_COOKIE_BROWSERS:
+            folder = browser_paths.get(b)
+            if not folder or not folder.exists():
+                continue
+            try:
+                if b in ("chrome", "edge", "brave"):
+                    has_db = any(folder.glob("*/Network/Cookies")) or any(folder.glob("*/Cookies"))
+                    if has_db:
+                        valid_browsers.append(b)
+                elif b == "firefox":
+                    if any(folder.glob("*/*.sqlite")):
+                        valid_browsers.append(b)
+                else:
+                    valid_browsers.append(b)
+            except Exception:
+                valid_browsers.append(b)
+        return valid_browsers
     return list(SUPPORTED_COOKIE_BROWSERS)
 
 
@@ -527,7 +561,7 @@ def fetch_info_with_ytdlp_api(
     requested_cookie = cookie_browser or (advanced.yt_dlp_cookie_browser() if advanced else None)
     browsers = [requested_cookie] if requested_cookie else [None]
     if is_douyin_url(url) and not cookie_browser:
-        browsers.extend(auto_cookie_browsers())
+        browsers.extend(installed_cookie_browsers())
 
     last_exc = None
     for b in browsers:
@@ -588,7 +622,7 @@ def fetch_info_result_with_auto_cookies(
     requested_cookie = cookie_browser or (advanced.yt_dlp_cookie_browser() if advanced else None)
     browsers = [requested_cookie] if requested_cookie else [None]
     if is_douyin_url(url) and not cookie_browser:
-        browsers.extend(auto_cookie_browsers())
+        browsers.extend(installed_cookie_browsers())
 
     last_error = ""
     for browser in browsers:
@@ -634,7 +668,10 @@ def download_media(
     cookie_browser: str | None = None,
     advanced: AdvancedOptions | None = None,
     archive_file: Path | None = None,
+    cancel_event: Any = None,
 ) -> Path:
+    if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+        raise RuntimeError("Download cancelled by user.")
     url = normalize_url(url)
     download_dir.mkdir(parents=True, exist_ok=True)
     douyin_engine = (advanced or AdvancedOptions()).normalized_douyin_engine()
@@ -642,11 +679,29 @@ def download_media(
         try:
             from .douyin_engine import download_with_jiji262
 
-            return download_with_jiji262(url, download_dir, advanced=advanced, progress_callback=progress_callback)
+            return download_with_jiji262(url, download_dir, advanced=advanced, progress_callback=progress_callback, cancel_event=cancel_event)
         except Exception as exc:
             log_event(f"JIJI262 fallback url={url} error={exc}")
             if douyin_engine == "jiji262":
                 raise
+            try:
+                provider_info = fetch_douyin_provider_info(url, timeout=min(timeout, 60))
+                video_formats = [fmt for fmt in provider_info.get("formats", []) if fmt.get("media_format") == "video"]
+                if video_formats:
+                    return download_snapdouyin_media(
+                        url,
+                        download_dir,
+                        job_id,
+                        title or str(provider_info.get("title") or ""),
+                        timeout,
+                        progress_callback,
+                        str(video_formats[0]["id"]),
+                        media_format,
+                        provider_info=None,
+                        cancel_event=cancel_event,
+                    )
+            except Exception as snap_exc:
+                log_event(f"JIJI262 snapdouyin fallback error url={url} error={snap_exc}")
             format_id = None
 
     if media_format == "video" and is_douyin_url(url) and douyin_engine == "yt-dlp" and format_id and format_id.startswith("snapdouyin-"):
@@ -662,10 +717,10 @@ def download_media(
                 raise RuntimeError("jiji262 local engine only supports video downloads")
             from .douyin_engine import download_with_jiji262
 
-            return download_with_jiji262(url, download_dir, advanced=advanced, progress_callback=progress_callback)
+            return download_with_jiji262(url, download_dir, advanced=advanced, progress_callback=progress_callback, cancel_event=cancel_event)
         if format_id and format_id.startswith("snapdouyin-"):
             try:
-                return download_snapdouyin_media(url, download_dir, job_id, title, timeout, progress_callback, format_id, media_format)
+                return download_snapdouyin_media(url, download_dir, job_id, title, timeout, progress_callback, format_id, media_format, cancel_event=cancel_event)
             except Exception as exc:
                 log_event(f"SNAPDOUYIN download failed url={url} format_id={format_id} error={exc}, falling back to yt-dlp")
                 format_id = None
@@ -716,7 +771,8 @@ def download_media(
                         progress_callback,
                         str(video_formats[0]["id"]),
                         media_format,
-                        provider_info=provider_info,
+                        provider_info=None,
+                        cancel_event=cancel_event,
                     )
             raise
 
@@ -738,39 +794,47 @@ def download_media(
         f"title={title} url={url} command={json.dumps(command, ensure_ascii=False)}"
     )
 
-    result = run_command_with_progress(command, timeout=timeout, progress_callback=progress_callback)
+    result = run_command_with_progress(command, timeout=timeout, progress_callback=progress_callback, cancel_event=cancel_event)
     if result.returncode != 0:
         error = last_error_line(result.stderr)
         log_event(f"DOWNLOAD error job={job_id} error={error}")
         if is_douyin_url(url) and not cookie_browser:
-            cookie_path = download_with_auto_cookies(
-                url=url,
-                download_dir=download_dir,
-                job_id=job_id,
-                media_format=media_format,
-                title=title,
-                format_id=format_id,
-                output_template=output_template,
-                timeout=timeout,
-                progress_callback=progress_callback,
-            )
-            if cookie_path:
-                return cookie_path
-        if media_format == "video" and is_douyin_url(url):
-            provider_info = fetch_douyin_provider_info(url, timeout=min(timeout, 60))
-            video_formats = [fmt for fmt in provider_info.get("formats", []) if fmt.get("media_format") == "video"]
-            if video_formats:
-                return download_snapdouyin_media(
-                    url,
-                    download_dir,
-                    job_id,
-                    title or str(provider_info.get("title") or ""),
-                    timeout,
-                    progress_callback,
-                    str(video_formats[0]["id"]),
-                    media_format,
-                    provider_info=provider_info,
+            try:
+                cookie_path = download_with_auto_cookies(
+                    url=url,
+                    download_dir=download_dir,
+                    job_id=job_id,
+                    media_format=media_format,
+                    title=title,
+                    format_id=format_id,
+                    output_template=output_template,
+                    timeout=timeout,
+                    progress_callback=progress_callback,
+                    cancel_event=cancel_event,
                 )
+                if cookie_path:
+                    return cookie_path
+            except Exception as auto_c_exc:
+                log_event(f"DOWNLOAD auto cookies error job={job_id} error={auto_c_exc}")
+        if media_format == "video" and is_douyin_url(url):
+            try:
+                provider_info = fetch_douyin_provider_info(url, timeout=min(timeout, 60))
+                video_formats = [fmt for fmt in provider_info.get("formats", []) if fmt.get("media_format") == "video"]
+                if video_formats:
+                    return download_snapdouyin_media(
+                        url,
+                        download_dir,
+                        job_id,
+                        title or str(provider_info.get("title") or ""),
+                        timeout,
+                        progress_callback,
+                        str(video_formats[0]["id"]),
+                        media_format,
+                        provider_info=provider_info,
+                        cancel_event=cancel_event,
+                    )
+            except Exception as snap_exc:
+                log_event(f"DOWNLOAD fallback snapdouyin error job={job_id} error={snap_exc}")
         if media_format == "video" and is_tiktok_url(url):
             return download_tikwm_video(url, download_dir, job_id, title, timeout, progress_callback)
         raise RuntimeError(error)
@@ -799,8 +863,11 @@ def download_with_auto_cookies(
     output_template: str,
     timeout: int,
     progress_callback: Callable[[int], None] | None = None,
+    cancel_event: Any = None,
 ) -> Path | None:
-    for browser in auto_cookie_browsers():
+    for browser in installed_cookie_browsers():
+        if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+            break
         request = DownloadRequest(
             url=url,
             output_template=output_template,
@@ -810,7 +877,7 @@ def download_with_auto_cookies(
         )
         command = build_download_command(request)
         log_event(f"DOWNLOAD retry cookies job={job_id} browser={browser} command={json.dumps(command, ensure_ascii=False)}")
-        result = run_command_with_progress(command, timeout=timeout, progress_callback=progress_callback)
+        result = run_command_with_progress(command, timeout=timeout, progress_callback=progress_callback, cancel_event=cancel_event)
         if result.returncode != 0:
             log_event(f"DOWNLOAD cookie error job={job_id} browser={browser} error={last_error_line(result.stderr)}")
             continue
@@ -841,7 +908,7 @@ def download_with_ytdlp_api(
     requested_cookie = cookie_browser or (advanced.yt_dlp_cookie_browser() if advanced else None)
     browsers = [requested_cookie] if requested_cookie else [None]
     if is_douyin_url(url) and not cookie_browser:
-        browsers.extend(auto_cookie_browsers())
+        browsers.extend(installed_cookie_browsers())
 
     output_template = str(download_dir / f"{job_id}.%(ext)s")
     last_exc = None
@@ -967,13 +1034,17 @@ def assert_downloaded_file_has_expected_stream(
     retries: int = 1,
     delay: float = 0.5,
 ) -> None:
+    p = Path(path)
+    if p.exists() and p.stat().st_size == 0:
+        raise ValueError(f"Downloaded file is empty (0 bytes): {p.name}")
     probe_output = ""
     attempts = max(1, retries)
     for attempt in range(attempts):
         probe_output = probe_media_streams(path)
-        if media_format == "video" and "Video:" in probe_output:
+        lower_probe = probe_output.lower()
+        if media_format == "video" and "video:" in lower_probe:
             return
-        if media_format == "audio" and "Audio:" in probe_output:
+        if media_format == "audio" and "audio:" in lower_probe:
             return
         if attempt < attempts - 1:
             time.sleep(delay)
@@ -1050,6 +1121,7 @@ def run_command_with_progress(
     command: list[str],
     timeout: int,
     progress_callback: Callable[[int], None] | None = None,
+    cancel_event: Any = None,
 ) -> subprocess.CompletedProcess[str]:
     process = subprocess.Popen(
         command,
@@ -1064,6 +1136,9 @@ def run_command_with_progress(
     try:
         assert process.stdout is not None
         for line in process.stdout:
+            if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+                process.kill()
+                raise RuntimeError("Download cancelled by user.")
             output_lines.append(line)
             progress = parse_yt_dlp_progress(line)
             if progress is not None and progress_callback:
@@ -1085,13 +1160,19 @@ def parse_yt_dlp_progress(line: str) -> int | None:
 
 
 def is_tiktok_url(url: str) -> bool:
-    host = urllib.parse.urlparse(url).netloc.lower()
+    clean = url.strip().lower()
+    if "tiktok.com" in clean or "tiktokv.com" in clean:
+        return True
+    host = urllib.parse.urlparse(clean).netloc.lower()
     return "tiktok.com" in host or "tiktokv.com" in host
 
 
 def is_douyin_url(url: str) -> bool:
-    host = urllib.parse.urlparse(url).netloc.lower()
-    return "douyin.com" in host
+    clean = url.strip().lower()
+    if "douyin.com" in clean or "iesdouyin.com" in clean:
+        return True
+    host = urllib.parse.urlparse(clean).netloc.lower()
+    return "douyin.com" in host or "iesdouyin.com" in host
 
 
 def fetch_tikwm_info(url: str, timeout: int = 30) -> dict[str, Any]:
@@ -1140,9 +1221,24 @@ def fetch_douyin_provider_info(url: str, timeout: int = 30) -> dict[str, Any]:
         return {"title": "", "thumbnail": "", "duration": None, "uploader": "", "formats": []}
 
 
+class PreserveRefererRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> urllib.request.Request | None:
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req:
+            ref = req.headers.get("Referer") or req.headers.get("referer")
+            if ref:
+                new_req.headers["Referer"] = ref
+        return new_req
+
+
 def build_cookie_opener() -> urllib.request.OpenerDirector:
     cookie_jar = http.cookiejar.CookieJar()
-    return urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+    return urllib.request.build_opener(
+        urllib.request.HTTPCookieProcessor(cookie_jar),
+        PreserveRefererRedirectHandler(),
+    )
 
 
 def fetch_snapdouyin_info(
@@ -1393,9 +1489,15 @@ def download_snapdouyin_media(
     format_id: str | None = None,
     media_format: str = "video",
     provider_info: dict[str, Any] | None = None,
+    cancel_event: Any = None,
 ) -> Path:
+    if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+        raise RuntimeError("Download cancelled by user.")
     opener = build_cookie_opener()
-    info = provider_info or fetch_snapdouyin_info(url, timeout=min(timeout, 60), opener=opener)
+    try:
+        info = fetch_snapdouyin_info(url, timeout=min(timeout, 60), opener=opener)
+    except Exception:
+        info = provider_info or fetch_snapdouyin_info(url, timeout=min(timeout, 60), opener=opener)
     media_map = info.get("snapdouyin_media") or {}
     selected = str(format_id or "")
     compatible = [
@@ -1413,6 +1515,8 @@ def download_snapdouyin_media(
 
     last_error = ""
     for fmt in ordered:
+        if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+            raise RuntimeError("Download cancelled by user.")
         option_id = str(fmt.get("id") or "")
         media_url = media_map.get(option_id)
         if not media_url:
@@ -1422,12 +1526,13 @@ def download_snapdouyin_media(
         try:
             log_event(f"SNAPDOUYIN download start job={job_id} option={option_id} url={url} media_url={media_url}")
             download_url_to_file(
-                add_query_param(str(media_url), "bandwidth_saving", "1"),
+                str(media_url),
                 temp_path,
                 timeout=timeout,
                 progress_callback=progress_callback,
                 referer=SNAPDOUYIN_HOME,
                 opener=opener,
+                cancel_event=cancel_event,
             )
             try:
                 assert_downloaded_file_has_expected_stream(temp_path, "audio" if extension in {"mp3", "m4a"} else "video")
@@ -1564,13 +1669,18 @@ def download_url_to_file(
     progress_callback: Callable[[int], None] | None = None,
     referer: str = "https://www.tiktok.com/",
     opener: urllib.request.OpenerDirector | None = None,
+    cancel_event: Any = None,
 ) -> None:
     request = urllib.request.Request(url, headers={**HTTP_HEADERS, "Referer": referer})
-    open_url = opener.open if opener else urllib.request.urlopen
+    if not opener:
+        opener = urllib.request.build_opener(PreserveRefererRedirectHandler())
+    open_url = opener.open
     with open_url(request, timeout=timeout) as response, path.open("wb") as output:
         total = int(response.headers.get("Content-Length") or 0)
         downloaded = 0
         while True:
+            if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+                raise RuntimeError("Download cancelled by user.")
             chunk = response.read(1024 * 256)
             if not chunk:
                 break
@@ -1578,6 +1688,8 @@ def download_url_to_file(
             downloaded += len(chunk)
             if total and progress_callback:
                 progress_callback(max(0, min(100, int(downloaded * 100 / total))))
+        if downloaded == 0:
+            raise RuntimeError("Downloaded 0 bytes from server.")
         if progress_callback:
             progress_callback(100)
 
@@ -1702,6 +1814,8 @@ def update_ytdlp(nightly: bool = False, timeout: int = 300) -> str:
 
 def is_channel_or_playlist_url(url: str) -> bool:
     url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
     parsed = urllib.parse.urlparse(url)
     host = parsed.netloc.lower()
     path = parsed.path.lower()
@@ -1710,8 +1824,8 @@ def is_channel_or_playlist_url(url: str) -> bool:
     if "youtube.com" in host or "youtu.be" in host:
         if "@" in path or "/channel/" in path or "/c/" in path or "/user/" in path or "list=" in query:
             return True
-    if "douyin.com" in host:
-        if "/user/" in path or "/user" in path:
+    if "douyin.com" in host or "iesdouyin.com" in host:
+        if "/user/" in path or "/user" in path or "sec_uid=" in query or "sec_uid=" in path:
             return True
         if "v.douyin.com" in host:
             return True
@@ -1761,35 +1875,36 @@ def fetch_youtube_channel_videos(
     return results
 
 
-def extract_douyin_sec_uid(url: str) -> str | None:
-    match = re.search(r"sec_uid=([^&]+)", url)
-    if match:
-        return match.group(1)
-    match2 = re.search(r"/user/([^/?#]+)", url)
-    if match2:
-        return match2.group(1)
-    return None
+def load_douyin_cookies(advanced: AdvancedOptions | None = None) -> dict[str, str]:
+    cookies: dict[str, str] = {}
+    engine_cookie = DATA_DIR / "douyin-engine" / "config" / "cookies.json"
+    vendor_cookie = APP_DIR / "vendors" / "douyin_downloader" / "config" / "cookies.json"
 
+    for cfile in (engine_cookie, vendor_cookie):
+        if cfile.exists():
+            try:
+                data = json.loads(cfile.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    cookies.update({str(k): str(v) for k, v in data.items() if v})
+                    if cookies:
+                        log_event(f"CHANNEL douyin cookies loaded from {cfile.name} count={len(cookies)}")
+                        break
+            except Exception as exc:
+                log_event(f"CHANNEL cookie file read error file={cfile} error={exc}")
 
-def fetch_douyin_channel_videos(
-    url: str, limit: int = 30, advanced: AdvancedOptions | None = None
-) -> list[dict[str, Any]]:
-    sec_uid = extract_douyin_sec_uid(url)
-    if not sec_uid and is_douyin_url(url):
-        try:
-            req = urllib.request.Request(url, headers=HTTP_HEADERS)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                sec_uid = extract_douyin_sec_uid(resp.geturl())
-        except Exception:
-            pass
+    env_cookie = os.environ.get("DOUYIN_COOKIE", "").strip()
+    if env_cookie:
+        for part in env_cookie.split(";"):
+            part = part.strip()
+            if "=" in part:
+                k, v = part.split("=", 1)
+                cookies[k.strip()] = v.strip()
 
-    if sec_uid:
-        cookies: dict[str, str] = {}
+    if not cookies:
         requested_browser = (advanced.yt_dlp_cookie_browser() if advanced else None) or "auto"
         browsers_to_try = (
             [requested_browser] if requested_browser not in {"auto", None} else ["firefox", "edge", "chrome", "brave"]
         )
-
         try:
             import yt_dlp.cookies
 
@@ -1807,6 +1922,35 @@ def fetch_douyin_channel_videos(
         except Exception as exc:
             log_event(f"CHANNEL cookie import error error={exc}")
 
+    return cookies
+
+
+def extract_douyin_sec_uid(url: str) -> str | None:
+    match = re.search(r"sec_uid=([^&]+)", url)
+    if match:
+        return match.group(1)
+    match2 = re.search(r"/user/([^/?#]+)", url)
+    if match2:
+        return match2.group(1)
+    return None
+
+
+def fetch_douyin_channel_videos(
+    url: str, limit: int = 30, advanced: AdvancedOptions | None = None, cancel_event: Any = None
+) -> list[dict[str, Any]]:
+    sec_uid = extract_douyin_sec_uid(url)
+    if not sec_uid and is_douyin_url(url):
+        try:
+            req = urllib.request.Request(url, headers=HTTP_HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                final_url = resp.geturl()
+                sec_uid = extract_douyin_sec_uid(final_url)
+        except Exception:
+            pass
+
+    if sec_uid:
+        cookies = load_douyin_cookies(advanced)
+
         try:
             import asyncio
             from .douyin_engine import vendor_path_context
@@ -1816,44 +1960,148 @@ def fetch_douyin_channel_videos(
 
             async def get_posts() -> list[dict[str, Any]]:
                 proxy = advanced.proxy.strip() if advanced else None
+                results: list[dict[str, Any]] = []
+                seen_ids: set[str] = set()
+                max_cursor = 0
+                has_more = True
+
                 with vendor_path_context():
                     async with DouyinAPIClient(cookies=cookies, proxy=proxy) as client:
-                        res = await client.get_user_post(sec_uid, count=max(20, limit if limit > 0 else 30), max_cursor=0)
-                aweme_list = res.get("aweme_list", [])
+                        while has_more:
+                            if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+                                log_event("CHANNEL douyin API cancelled by user")
+                                break
+                            req_cursor = max_cursor
+                            fetch_count = 20 if limit <= 0 else min(20, limit - len(results))
+                            res = await client.get_user_post(sec_uid, count=fetch_count, max_cursor=req_cursor)
+                            aweme_list = res.get("aweme_list", [])
+                            if not aweme_list:
+                                break
 
-                results: list[dict[str, Any]] = []
-                for item in aweme_list:
-                    if not isinstance(item, dict):
-                        continue
-                    aweme_id = str(item.get("aweme_id") or "")
-                    desc = str(item.get("desc") or aweme_id or "Douyin Video")
-                    author = str(item.get("author", {}).get("nickname") or "Douyin Creator")
-                    dur_val = item.get("duration") or (item.get("video", {}).get("duration") or 0) / 1000.0
-                    video_url = f"https://www.douyin.com/video/{aweme_id}" if aweme_id else ""
-                    thumbnail = ""
-                    video_dict = item.get("video", {})
-                    if isinstance(video_dict, dict):
-                        cover = video_dict.get("cover") or video_dict.get("origin_cover") or {}
-                        url_list = cover.get("url_list") or []
-                        if url_list:
-                            thumbnail = str(url_list[0])
+                            for item in aweme_list:
+                                if not isinstance(item, dict):
+                                    continue
+                                aweme_id = str(item.get("aweme_id") or "")
+                                if not aweme_id or aweme_id in seen_ids:
+                                    continue
+                                seen_ids.add(aweme_id)
+                                desc = str(item.get("desc") or aweme_id or "Douyin Video")
+                                author = str(item.get("author", {}).get("nickname") or "Douyin Creator")
+                                raw_dur = item.get("duration") or (item.get("video", {}) or {}).get("duration") or 0
+                                dur_val = (raw_dur / 1000.0) if raw_dur > 1000 else float(raw_dur)
+                                video_url = f"https://www.douyin.com/video/{aweme_id}" if aweme_id else ""
+                                thumbnail = ""
+                                video_dict = item.get("video", {})
+                                if isinstance(video_dict, dict):
+                                    cover = video_dict.get("cover") or video_dict.get("origin_cover") or {}
+                                    url_list = cover.get("url_list") or []
+                                    if url_list:
+                                        thumbnail = str(url_list[0])
 
-                    if video_url:
-                        results.append(
-                            {
-                                "id": aweme_id,
-                                "url": video_url,
-                                "title": desc,
-                                "duration": dur_val,
-                                "uploader": author,
-                                "thumbnail": thumbnail,
-                            }
-                        )
+                                if video_url:
+                                    results.append(
+                                        {
+                                            "id": aweme_id,
+                                            "url": video_url,
+                                            "title": desc,
+                                            "duration": dur_val,
+                                            "uploader": author,
+                                            "thumbnail": thumbnail,
+                                        }
+                                    )
+                                    if limit > 0 and len(results) >= limit:
+                                        return results
+
+                            has_more = bool(res.get("has_more", False))
+                            next_cursor = int(res.get("max_cursor", 0) or 0)
+                            if has_more and next_cursor == req_cursor:
+                                break
+                            max_cursor = next_cursor
+                            await asyncio.sleep(0.3)
+
+                        if not results:
+                            # If direct API returned no items (e.g. ArgusSecurityPlugin / anti-bot), fallback to Playwright browser
+                            log_event(f"CHANNEL douyin API returned 0 posts; starting browser fallback for sec_uid={sec_uid}")
+                            browser_ids = await client.collect_user_post_ids_via_browser(
+                                sec_uid,
+                                expected_count=limit if limit > 0 else 0,
+                                headless=True,
+                                max_scrolls=120,
+                                idle_rounds=6,
+                                wait_timeout_seconds=45,
+                                cancel_event=cancel_event,
+                            )
+                            cached_items = getattr(client, "_browser_post_aweme_items", {}) or {}
+                            cached_dom_meta = getattr(client, "_browser_post_dom_items", {}) or {}
+                            author_nickname = getattr(client, "browser_author_nickname", "") or getattr(client, "_browser_author_nickname", "") or "Douyin Creator"
+
+                            for bid in browser_ids:
+                                if limit > 0 and len(results) >= limit:
+                                    break
+                                if bid in seen_ids:
+                                    continue
+                                seen_ids.add(bid)
+                                item = cached_items.get(bid)
+                                if isinstance(item, dict):
+                                    desc = str(item.get("desc") or bid or f"Douyin Video {bid}")
+                                    author = str(item.get("author", {}).get("nickname") or author_nickname)
+                                    raw_dur = item.get("duration") or (item.get("video", {}) or {}).get("duration") or 0
+                                    dur_val = (raw_dur / 1000.0) if raw_dur > 1000 else float(raw_dur)
+                                    video_url = f"https://www.douyin.com/video/{bid}"
+                                    thumbnail = ""
+                                    vdict = item.get("video", {})
+                                    if isinstance(vdict, dict):
+                                        c = vdict.get("cover") or vdict.get("origin_cover") or {}
+                                        ulist = c.get("url_list") or []
+                                        if ulist:
+                                            thumbnail = str(ulist[0])
+                                    results.append(
+                                        {
+                                            "id": bid,
+                                            "url": video_url,
+                                            "title": desc,
+                                            "duration": dur_val,
+                                            "uploader": author,
+                                            "thumbnail": thumbnail,
+                                        }
+                                    )
+                                else:
+                                    dom_meta = cached_dom_meta.get(bid, {})
+                                    dom_title = dom_meta.get("title") or f"Douyin Video {bid}"
+                                    dom_cover = dom_meta.get("cover") or ""
+                                    results.append(
+                                        {
+                                            "id": bid,
+                                            "url": f"https://www.douyin.com/video/{bid}",
+                                            "title": dom_title,
+                                            "duration": 0,
+                                            "uploader": author_nickname,
+                                            "thumbnail": dom_cover,
+                                        }
+                                    )
+
                 return results
-
 
             results = asyncio.run(get_posts())
             if results:
+                # Enrich titles if any have placeholder format
+                placeholders = [r for r in results if r["title"].startswith("Douyin Video ")]
+                if placeholders:
+                    from concurrent.futures import ThreadPoolExecutor
+
+                    def enrich_title(r: dict[str, Any]) -> None:
+                        try:
+                            info = fetch_douyin_provider_info(r["url"])
+                            if info and info.get("title"):
+                                r["title"] = info["title"]
+                            if info and info.get("uploader") and r["uploader"] in {"Douyin Creator", ""}:
+                                r["uploader"] = info["uploader"]
+                        except Exception:
+                            pass
+
+                    with ThreadPoolExecutor(max_workers=min(5, len(placeholders))) as executor:
+                        list(executor.map(enrich_title, placeholders[:50]))
+
                 log_event(f"CHANNEL douyin APIClient success count={len(results)}")
                 return results
         except Exception as exc:
@@ -1862,7 +2110,7 @@ def fetch_douyin_channel_videos(
     import yt_dlp
 
     requested_cookie = advanced.yt_dlp_cookie_browser() if advanced else None
-    browsers = [requested_cookie] if requested_cookie else [None] + auto_cookie_browsers()
+    browsers = [requested_cookie] if requested_cookie else [None] + installed_cookie_browsers()
 
     last_exc = None
     for b in browsers:
@@ -1901,6 +2149,10 @@ def fetch_douyin_channel_videos(
                 if results:
                     return results
         except Exception as exc:
+            err_str = str(exc).lower()
+            if "cookies database" in err_str or "could not copy" in err_str:
+                log_event(f"INFO channel fetch browser cookie warning url={url} browser={b or 'none'} error={exc}")
+                continue
             last_exc = exc
             log_event(f"INFO channel fetch error url={url} browser={b or 'none'} error={exc}")
 
@@ -1915,11 +2167,12 @@ def fetch_channel_videos(
     limit: int = 30,
     keyword: str = "",
     advanced: AdvancedOptions | None = None,
+    cancel_event: Any = None,
 ) -> list[dict[str, Any]]:
     url = normalize_url(url)
     log_event(f"CHANNEL fetch start url={url} limit={limit} keyword={keyword}")
     if is_douyin_url(url):
-        items = fetch_douyin_channel_videos(url, limit=limit, advanced=advanced)
+        items = fetch_douyin_channel_videos(url, limit=limit, advanced=advanced, cancel_event=cancel_event)
     else:
         items = fetch_youtube_channel_videos(url, limit=limit, advanced=advanced)
 

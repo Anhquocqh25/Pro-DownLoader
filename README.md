@@ -44,6 +44,10 @@ The hosted service:
 - Try `yt-dlp` first for TikTok, then use TikWM or TikMate when needed.
 - Prefer the bundled jiji262 engine for Douyin, with SnapDouyin and `yt-dlp`
   fallback paths.
+- Douyin Full Channel / User Profile Batch Downloader: automatic pagination,
+  SQLite deduplication, no-watermark downloads, and 1-Click direct channel download.
+- Douyin Cookie Manager: easy paste or Playwright automatic login to bypass
+  Douyin anti-scraping checks.
 - Browser cookies, proxy, max quality, subtitles/language, metadata,
   thumbnail, impersonation, and Douyin engine controls.
 - Download progress, history/archive, duplicate protection, and open-video

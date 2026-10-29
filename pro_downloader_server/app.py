@@ -20,14 +20,17 @@ from reclip_desktop.core import (
     ARCHIVE_FILE,
     DATA_DIR,
     download_media,
+    fetch_channel_videos,
     fetch_video_info,
     find_history_entry,
     friendly_error,
+    is_douyin_url,
     load_history,
     normalize_url,
     record_history,
     validate_url_input,
 )
+from reclip_desktop.douyin_engine import download_channel_with_jiji262
 
 SERVER_DOWNLOAD_DIR = Path(os.environ.get("PRO_DOWNLOADER_DOWNLOAD_DIR", str(Path.home() / "Downloads" / f"{APP_NAME} Server")))
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -84,6 +87,34 @@ class DownloadRequest(BaseModel):
     provider: str = ""
     option: str = ""
     reuse_history: bool = True
+    options: AdvancedOptionsPayload = Field(default_factory=AdvancedOptionsPayload)
+
+
+class ChannelFetchRequest(BaseModel):
+    url: str = Field(min_length=1)
+    limit: int = 30
+    keyword: str = ""
+    options: AdvancedOptionsPayload = Field(default_factory=AdvancedOptionsPayload)
+
+
+class ChannelVideoItem(BaseModel):
+    id: str
+    url: str
+    title: str
+    duration: float | None = None
+    uploader: str = ""
+    thumbnail: str = ""
+
+
+class ChannelFetchResponse(BaseModel):
+    url: str
+    total: int
+    items: list[ChannelVideoItem]
+
+
+class ChannelDownloadRequest(BaseModel):
+    url: str = Field(min_length=1)
+    limit: int = 0
     options: AdvancedOptionsPayload = Field(default_factory=AdvancedOptionsPayload)
 
 
@@ -235,6 +266,81 @@ def create_app(
             thread.start()
 
         return DownloadCreated(job_id=job.job_id, status=store.get(job.job_id).status if store.get(job.job_id) else job.status)
+
+    @router.post("/channel/fetch", response_model=ChannelFetchResponse)
+    def channel_fetch(request: ChannelFetchRequest) -> ChannelFetchResponse:
+        urls, error = validate_url_input(request.url)
+        if error or not urls:
+            raise HTTPException(status_code=422, detail=error or "Invalid URL")
+        url = normalize_url(urls[0])
+        try:
+            items = fetch_channel_videos(
+                url,
+                limit=request.limit,
+                keyword=request.keyword,
+                advanced=request.options.to_core(),
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=friendly_error(str(exc))) from exc
+
+        parsed_items = [
+            ChannelVideoItem(
+                id=str(item.get("id") or ""),
+                url=str(item.get("url") or ""),
+                title=str(item.get("title") or ""),
+                duration=float(item.get("duration")) if isinstance(item.get("duration"), (int, float)) else None,
+                uploader=str(item.get("uploader") or ""),
+                thumbnail=str(item.get("thumbnail") or ""),
+            )
+            for item in items
+        ]
+        return ChannelFetchResponse(url=url, total=len(parsed_items), items=parsed_items)
+
+    @router.post("/channel/download", response_model=DownloadCreated)
+    def channel_download(request: ChannelDownloadRequest) -> DownloadCreated:
+        cleanup_expired_downloads(download_root, retention_hours)
+        urls, error = validate_url_input(request.url)
+        if error or not urls:
+            raise HTTPException(status_code=422, detail=error or "Invalid URL")
+        url = normalize_url(urls[0])
+        job_req = DownloadRequest(
+            url=url,
+            media_format="video",
+            title=f"Channel Batch: {url}",
+            provider="jiji262" if is_douyin_url(url) else "yt-dlp",
+            options=request.options,
+        )
+        job = store.create(job_req)
+
+        def run_channel_job() -> None:
+            store.update(job.job_id, status="running", progress=1)
+            try:
+                def progress_cb(pct: int, msg: str) -> None:
+                    store.update(job.job_id, progress=pct, option=msg)
+
+                if is_douyin_url(url):
+                    summary = download_channel_with_jiji262(
+                        url=url,
+                        download_dir=download_root,
+                        advanced=request.options.to_core(),
+                        limit=request.limit,
+                        progress_callback=progress_cb,
+                    )
+                    store.update(
+                        job.job_id,
+                        status="done",
+                        progress=100,
+                        title=f"Kênh: {summary.get('author', 'Douyin')}",
+                        option=f"Xong {summary.get('success', 0)}/{summary.get('total', 0)} video (Bỏ qua: {summary.get('skipped', 0)})",
+                    )
+                else:
+                    store.update(job.job_id, status="error", error="Direct 1-Click channel download currently supports Douyin.")
+            except Exception as exc:
+                store.update(job.job_id, status="error", error=friendly_error(str(exc)))
+
+        thread = threading.Thread(target=run_channel_job, daemon=True)
+        thread.start()
+        return DownloadCreated(job_id=job.job_id, status="queued")
 
     @router.get("/jobs", response_model=list[JobResponse])
     def list_jobs() -> list[JobResponse]:

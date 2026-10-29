@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
@@ -54,7 +55,9 @@ class DouyinAPIClient:
         self.proxy = str(proxy or "").strip()
         self._session: Optional[aiohttp.ClientSession] = None
         self._browser_post_aweme_items: Dict[str, Dict[str, Any]] = {}
+        self._browser_post_dom_items: Dict[str, Dict[str, Any]] = {}
         self._browser_post_stats: Dict[str, int] = {}
+        self._browser_author_nickname: str = ""
         selected_ua = random.choice(_USER_AGENT_POOL)
         self.headers = {
             "User-Agent": selected_ua,
@@ -140,7 +143,7 @@ class DouyinAPIClient:
             "round_trip_time": "200",
             "support_h265": "1",
             "support_dash": "1",
-            "uifid": "",
+            "uifid": str(self.cookies.get("UIFID") or self.cookies.get("UIFID_TEMP") or ""),
             "msToken": ms_token,
         }
 
@@ -822,6 +825,7 @@ class DouyinAPIClient:
         max_scrolls: int = 240,
         idle_rounds: int = 8,
         wait_timeout_seconds: int = 600,
+        cancel_event: Any = None,
     ) -> List[str]:
         try:
             from playwright.async_api import async_playwright
@@ -838,7 +842,9 @@ class DouyinAPIClient:
         post_api_aweme_items: Dict[str, Dict[str, Any]] = {}
         post_api_page_hits = 0
         self._browser_post_aweme_items = {}
+        self._browser_post_dom_items: Dict[str, Dict[str, Any]] = {}
         self._browser_post_stats = {}
+        self._browser_author_nickname = ""
 
         def _merge(new_ids: List[str]):
             for aweme_id in new_ids:
@@ -860,8 +866,11 @@ class DouyinAPIClient:
                     "--no-sandbox",
                 ],
             )
+            browser_ua = self.headers.get("User-Agent", "")
+            if not browser_ua or "Macintosh" in browser_ua or sys.platform == "win32":
+                browser_ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
             context = await browser.new_context(
-                user_agent=self.headers.get("User-Agent", ""),
+                user_agent=browser_ua,
                 locale="zh-CN",
                 viewport={"width": 1600, "height": 900},
             )
@@ -873,17 +882,34 @@ class DouyinAPIClient:
             pending_response_tasks: List[asyncio.Task] = []
 
             async def _handle_response(response):
-                nonlocal post_api_page_hits
+                nonlocal post_api_page_hits, expected_count
                 url = response.url or ""
-                if "/aweme/v1/web/aweme/post/" not in url:
+
+                if "/aweme/v1/web/user/profile/other/" in url and response.status == 200:
+                    try:
+                        u_data = await response.json()
+                        user_obj = u_data.get("user") or {}
+                        nick = user_obj.get("nickname")
+                        if nick:
+                            self._browser_author_nickname = str(nick)
+                        cnt = user_obj.get("aweme_count")
+                        if isinstance(cnt, int) and cnt > 0 and expected_count <= 0:
+                            expected_count = cnt
+                            logger.info("Auto-detected author total works: %s (author: %s)", cnt, nick)
+                    except Exception:
+                        pass
+
+                if "/aweme/v1/web/aweme/post/" not in url or response.status != 200:
                     return
                 try:
                     data = await response.json()
-                except Exception:
+                except Exception as e:
+                    logger.warning("Failed to parse aweme/post json: %s", e)
                     return
                 aweme_items = data.get("aweme_list") if isinstance(data, dict) else None
                 if isinstance(aweme_items, list):
                     post_api_page_hits += 1
+                    logger.warning("Intercepted aweme/post: %s items", len(aweme_items))
                     extracted: List[str] = []
                     for item in aweme_items:
                         if not isinstance(item, dict):
@@ -942,37 +968,75 @@ class DouyinAPIClient:
                             logger.warning("Reload user page after verification failed: %s", exc)
 
                 try:
-                    warmup_seconds = min(20, max(3, int(wait_timeout_seconds)))
+                    try:
+                        await page.wait_for_selector(
+                            '[data-e2e="user-post-list"], ul[data-e2e="scroll-list"], .user-post-list',
+                            timeout=min(12000, timeout_ms),
+                        )
+                    except Exception:
+                        pass
+
+                    warmup_seconds = min(15, max(4, int(wait_timeout_seconds)))
                     for _ in range(warmup_seconds):
+                        if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+                            logger.info("Browser fallback warmup cancelled by user")
+                            break
                         if page.is_closed():
                             logger.warning("Browser page closed during warmup")
                             break
-                        _merge(await self._extract_aweme_ids_from_page(page))
-                        if ids:
+                        extracted_ids = await self._extract_aweme_ids_from_page(page)
+                        _merge(extracted_ids)
+                        if post_api_ids or (extracted_ids and len(extracted_ids) >= 3):
                             break
                         await page.wait_for_timeout(1000)
+
+                    try:
+                        await page.mouse.move(800, 500)
+                    except Exception:
+                        pass
 
                     stable_rounds = 0
                     max_scroll_rounds = max(1, int(max_scrolls))
                     idle_stop_rounds = max(1, int(idle_rounds))
 
                     for _ in range(max_scroll_rounds):
+                        if cancel_event and getattr(cancel_event, "is_set", lambda: False)():
+                            logger.info("Browser fallback scrolling cancelled by user")
+                            break
                         if page.is_closed():
                             logger.warning("Browser page closed during scrolling")
                             break
-                        await page.mouse.wheel(0, 3800)
-                        await page.wait_for_timeout(1200)
 
-                        before = len(ids)
-                        _merge(await self._extract_aweme_ids_from_page(page))
-                        if len(ids) == before:
+                        try:
+                            await page.evaluate('''() => {
+                                const c = document.querySelector('.parent-route-container, [class*="route-scroll"], [data-e2e="user-post-list"]');
+                                if (c) {
+                                    c.scrollTop = c.scrollHeight;
+                                }
+                            }''')
+                        except Exception:
+                            pass
+
+                        await page.mouse.wheel(0, 3200)
+                        await page.wait_for_timeout(1400)
+
+                        before = max(len(ids), len(post_api_ids))
+                        extracted_ids = await self._extract_aweme_ids_from_page(page)
+                        _merge(extracted_ids)
+                        current_count = max(len(ids), len(post_api_ids))
+
+                        logger.warning("Browser fallback scroll round: DOM_ids=%s, API_ids=%s, total=%s", len(ids), len(post_api_ids), current_count)
+
+                        if current_count == before:
                             stable_rounds += 1
                         else:
                             stable_rounds = 0
 
-                        if expected_count > 0 and len(ids) >= expected_count:
+                        if expected_count > 0 and current_count >= expected_count:
+                            logger.info("Browser fallback reached expected count %s", expected_count)
                             break
-                        if expected_count <= 0 and stable_rounds >= idle_stop_rounds:
+                        if stable_rounds >= idle_stop_rounds:
+                            logger.info("Browser fallback stable for %s rounds, total=%s", stable_rounds, current_count)
                             break
                 except Exception as exc:
                     logger.warning(
@@ -1023,12 +1087,19 @@ class DouyinAPIClient:
         self._browser_post_stats = {}
         return stats
 
+    def pop_browser_post_dom_items(self) -> Dict[str, Dict[str, Any]]:
+        items = getattr(self, "_browser_post_dom_items", {}) or {}
+        self._browser_post_dom_items = {}
+        return items
+
+    @property
+    def browser_author_nickname(self) -> str:
+        return getattr(self, "_browser_author_nickname", "") or ""
+
     def _browser_cookie_payload(self) -> List[Dict[str, str]]:
         payload: List[Dict[str, str]] = []
         for name, value in self.cookies.items():
             if not name:
-                continue
-            if name in self._BROWSER_COOKIE_BLOCKLIST:
                 continue
             payload.append(
                 {
@@ -1043,38 +1114,52 @@ class DouyinAPIClient:
         script = """
 () => {
   const result = [];
+  const meta = {};
   const seen = new Set();
-  const push = (id) => {
+  const push = (id, title, cover) => {
     if (!id || seen.has(id)) return;
     seen.add(id);
     result.push(id);
+    meta[id] = { id: id, title: title || '', cover: cover || '' };
   };
 
-  const collectFrom = (text, pattern) => {
-    if (!text) return;
-    let match;
-    while ((match = pattern.exec(text)) !== null) {
-      push(match[1]);
-    }
-  };
+  const container = document.querySelector('[data-e2e="user-post-list"], ul[data-e2e="scroll-list"], .user-post-list');
+  const selector = container 
+    ? 'a[href*="/video/"], a[href*="/note/"]' 
+    : '[data-e2e="user-post-list"] a[href*="/video/"], [data-e2e="user-post-list"] a[href*="/note/"], ul[data-e2e="scroll-list"] a[href*="/video/"], ul[data-e2e="scroll-list"] a[href*="/note/"]';
+  
+  const root = container || document;
+  const links = root.querySelectorAll(selector);
 
-  const links = document.querySelectorAll("a[href]");
   for (const node of links) {
+    if (node.closest('footer') || node.closest('[data-e2e="page-footer"]')) continue;
+    
     const href = node.getAttribute("href") || "";
-    collectFrom(href, /\\/video\\/(\\d{15,20})/g);
-    collectFrom(href, /\\/note\\/(\\d{15,20})/g);
+    if (href.includes("Baiduspider") || href.includes("source=recommend")) continue;
+
+    const m = href.match(/\\/(video|note)\\/(\\d{15,20})/);
+    if (m && m[2]) {
+      const id = m[2];
+      const title = (node.innerText || "").trim().replace(/\\s+/g, " ");
+      const img = node.querySelector("img");
+      const cover = img ? (img.getAttribute("src") || "") : "";
+      push(id, title, cover);
+    }
   }
 
-  const html = document.documentElement ? document.documentElement.innerHTML : "";
-  collectFrom(html, /"aweme_id":"(\\d{15,20})"/g);
-  collectFrom(html, /"group_id":"(\\d{15,20})"/g);
-
-  return result;
+  return { ids: result, meta: meta };
 }
 """
         try:
             data = await page.evaluate(script)
-            if isinstance(data, list):
+            if isinstance(data, dict):
+                meta_dict = data.get("meta") or {}
+                if isinstance(meta_dict, dict) and hasattr(self, "_browser_post_dom_items"):
+                    self._browser_post_dom_items.update(meta_dict)
+                id_list = data.get("ids") or []
+                if isinstance(id_list, list):
+                    return [str(x) for x in id_list if x]
+            elif isinstance(data, list):
                 return [str(x) for x in data if x]
         except Exception as exc:
             logger.debug("Extract aweme_id from page failed: %s", exc)

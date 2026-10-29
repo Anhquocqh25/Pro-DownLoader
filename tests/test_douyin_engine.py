@@ -5,10 +5,13 @@ from unittest.mock import patch
 from reclip_desktop.core import DATA_DIR, AdvancedOptions
 from reclip_desktop.douyin_engine import (
     CallbackProgressReporter,
+    ChannelProgressReporter,
+    build_channel_engine_config,
     build_engine_config,
     engine_cookie_file,
     find_existing_media_for_url,
     find_new_media_file,
+    save_douyin_cookie_string,
     vendor_path_context,
 )
 
@@ -98,6 +101,47 @@ class DouyinEngineTests(unittest.TestCase):
 
             self.assertEqual(sys.path[0], fake_path)
         self.assertNotEqual(__import__("sys").path[0], fake_path)
+
+    def test_build_channel_engine_config(self):
+        config = build_channel_engine_config(
+            url="https://www.douyin.com/user/MS4wLjABAAAA...",
+            download_dir=Path("downloads"),
+            advanced=AdvancedOptions(proxy="http://127.0.0.1:7890"),
+            limit=50,
+        )
+        self.assertEqual(config["link"], ["https://www.douyin.com/user/MS4wLjABAAAA..."])
+        self.assertTrue(config["folderstyle"])
+        self.assertTrue(config["database"])
+        self.assertEqual(config["mode"], ["post"])
+        self.assertEqual(config["number"]["post"], 50)
+        self.assertEqual(config["thread"], 3)
+
+    def test_channel_progress_reporter(self):
+        records = []
+        reporter = ChannelProgressReporter(lambda pct, msg: records.append((pct, msg)))
+        reporter.on_author("TestAuthor")
+        reporter.set_item_total(10)
+        reporter.advance_item("success", "video_1")
+        reporter.advance_item("skipped", "video_2")
+
+        self.assertEqual(reporter.author_nickname, "TestAuthor")
+        self.assertEqual(reporter.success_count, 1)
+        self.assertEqual(reporter.skipped_count, 1)
+        self.assertEqual(reporter.completed_items, 2)
+        self.assertTrue(len(records) >= 4)
+
+    def test_save_douyin_cookie_string(self):
+        import tempfile
+        import json
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_cookie = Path(tmp_dir) / "cookies.json"
+            with patch("reclip_desktop.douyin_engine.engine_cookie_file", return_value=fake_cookie):
+                res = save_douyin_cookie_string("msToken=abc123xyz; ttwid=test_ttwid; sessionid=sess_123")
+                self.assertTrue(res.exists())
+                data = json.loads(res.read_text(encoding="utf-8"))
+                self.assertEqual(data["msToken"], "abc123xyz")
+                self.assertEqual(data["ttwid"], "test_ttwid")
+                self.assertEqual(data["sessionid"], "sess_123")
 
 
 if __name__ == "__main__":

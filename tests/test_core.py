@@ -19,10 +19,12 @@ from reclip_desktop.core import (
     extract_subtitle_languages,
     extract_urls,
     fetch_channel_videos,
+    fetch_douyin_channel_videos,
     finalize_downloaded_job_file,
     friendly_error,
     is_channel_or_playlist_url,
     is_douyin_url,
+    load_douyin_cookies,
     APP_NAME,
     normalize_url,
     parse_snapdouyin_response,
@@ -128,6 +130,58 @@ class CoreTests(unittest.TestCase):
             res = fetch_channel_videos("https://www.youtube.com/@Dev/videos", limit=1, keyword="python")
             self.assertEqual(len(res), 1)
             self.assertEqual(res[0]["title"], "Python Tutorial 1")
+
+    def test_load_douyin_cookies_reads_file_and_env(self):
+        import json
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            fake_cookie = Path(tmp_dir) / "cookies.json"
+            fake_cookie.write_text(json.dumps({"msToken": "tok_123", "ttwid": "wid_456"}), encoding="utf-8")
+            with (
+                patch("pathlib.Path.exists", side_effect=lambda: True),
+                patch("pathlib.Path.read_text", return_value=fake_cookie.read_text(encoding="utf-8")),
+            ):
+                cookies = load_douyin_cookies()
+                self.assertEqual(cookies.get("msToken"), "tok_123")
+                self.assertEqual(cookies.get("ttwid"), "wid_456")
+
+    def test_fetch_douyin_channel_videos_paginates(self):
+        import sys
+        import types
+
+        page1 = {
+            "has_more": True,
+            "max_cursor": 100,
+            "aweme_list": [{"aweme_id": "vid1", "desc": "Video 1", "author": {"nickname": "User"}}],
+        }
+        page2 = {
+            "has_more": False,
+            "max_cursor": 0,
+            "aweme_list": [{"aweme_id": "vid2", "desc": "Video 2", "author": {"nickname": "User"}}],
+        }
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                pass
+            async def get_user_post(self, sec_uid, count=20, max_cursor=0):
+                if max_cursor == 0:
+                    return page1
+                return page2
+
+        fake_core = types.ModuleType("core")
+        fake_api_client = types.ModuleType("core.api_client")
+        fake_api_client.DouyinAPIClient = FakeClient
+        fake_core.api_client = fake_api_client
+
+        with patch.dict(sys.modules, {"core": fake_core, "core.api_client": fake_api_client}):
+            with patch("reclip_desktop.core.load_douyin_cookies", return_value={"msToken": "test"}):
+                results = fetch_douyin_channel_videos("https://www.douyin.com/user/MS4wLjABAAAA_test", limit=0)
+                self.assertEqual(len(results), 2)
+                self.assertEqual(results[0]["id"], "vid1")
+                self.assertEqual(results[1]["id"], "vid2")
 
 
     def test_select_formats_keeps_best_bitrate_per_height(self):
@@ -635,6 +689,49 @@ class CoreTests(unittest.TestCase):
         )
 
         self.assertEqual(friendly_error("x" * 90), "x" * 80 + "...")
+
+    def test_download_with_auto_cookies_accepts_cancel_event(self):
+        import threading
+        from reclip_desktop.core import download_with_auto_cookies
+        cancel_evt = threading.Event()
+        cancel_evt.set()
+        # Should return None cleanly when cancelled
+        res = download_with_auto_cookies(
+            url="https://www.douyin.com/video/123",
+            download_dir=Path("."),
+            job_id="job",
+            media_format="video",
+            title="test",
+            format_id=None,
+            output_template="out.mp4",
+            timeout=10,
+            cancel_event=cancel_evt,
+        )
+        self.assertIsNone(res)
+
+    def test_download_url_to_file_zero_bytes_raises(self):
+        from reclip_desktop.core import download_url_to_file
+        import io
+        from unittest.mock import MagicMock
+        mock_resp = MagicMock()
+        mock_resp.headers = {"Content-Length": "0"}
+        mock_resp.read.side_effect = [b""]
+        mock_opener = MagicMock()
+        mock_opener.open.return_value.__enter__.return_value = mock_resp
+        tmp_target = Path("tmp_zero_test.mp4")
+        try:
+            with self.assertRaises(RuntimeError) as ctx:
+                download_url_to_file("http://fake.url", tmp_target, opener=mock_opener)
+            self.assertIn("0 bytes", str(ctx.exception))
+        finally:
+            if tmp_target.exists():
+                tmp_target.unlink()
+
+    def test_assert_downloaded_file_accepts_lowercase_video(self):
+        from reclip_desktop.core import assert_downloaded_file_has_expected_stream
+        ffmpeg_output = "input #0\n  stream #0:0: video: h264\n  stream #0:1: audio: aac"
+        with patch("reclip_desktop.core.probe_media_streams", return_value=ffmpeg_output):
+            assert_downloaded_file_has_expected_stream("job.mp4", "video")
 
 
 if __name__ == "__main__":
