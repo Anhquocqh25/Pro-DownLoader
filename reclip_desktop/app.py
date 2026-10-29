@@ -18,6 +18,7 @@ import customtkinter as ctk
 
 from .core import (
     APP_NAME,
+    APP_VERSION,
     ARCHIVE_FILE,
     AdvancedOptions,
     cleanup_temp_files,
@@ -47,6 +48,7 @@ from .douyin_engine import (
 )
 from .thumbnail_cache import ThumbnailCache
 from .translator import batch_translate_texts, clean_title, translate_text
+from .updater import check_for_updates, perform_one_click_update, restart_application
 
 
 class ProDownloaderApp:
@@ -130,14 +132,14 @@ class ProDownloaderApp:
         # -----------------------------
         self.sidebar = ctk.CTkFrame(self.root, width=230, corner_radius=0)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
-        self.sidebar.grid_rowconfigure(6, weight=1)
+        self.sidebar.grid_rowconfigure(7, weight=1)
 
         logo_label = ctk.CTkLabel(
             self.sidebar,
             text="⚡ PRO DOWNLOADER",
             font=ctk.CTkFont(size=17, weight="bold"),
         )
-        logo_label.grid(row=0, column=0, padx=20, pady=(20, 4), sticky="w")
+        logo_label.grid(row=0, column=0, padx=20, pady=(20, 2), sticky="w")
 
         sub_logo = ctk.CTkLabel(
             self.sidebar,
@@ -145,7 +147,36 @@ class ProDownloaderApp:
             font=ctk.CTkFont(size=11),
             text_color="gray",
         )
-        sub_logo.grid(row=1, column=0, padx=20, pady=(0, 20), sticky="w")
+        sub_logo.grid(row=1, column=0, padx=20, pady=(0, 8), sticky="w")
+
+        # Version badge & 1-Click Update button
+        ver_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        ver_frame.grid(row=2, column=0, padx=14, pady=(0, 16), sticky="ew")
+
+        ver_pill = ctk.CTkLabel(
+            ver_frame,
+            text=f"v{APP_VERSION}",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            fg_color=["#EEF2FF", "#312E81"],
+            text_color=["#4F46E5", "#A5B4FC"],
+            corner_radius=6,
+            padx=8,
+            pady=3,
+        )
+        ver_pill.pack(side="left")
+
+        self.update_btn = ctk.CTkButton(
+            ver_frame,
+            text="🔄 Cập Nhật 1-Click",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            height=28,
+            fg_color=["#4F46E5", "#4338CA"],
+            hover_color=["#4338CA", "#3730A3"],
+            text_color="#FFFFFF",
+            corner_radius=6,
+            command=self.check_and_update_ui,
+        )
+        self.update_btn.pack(side="right", padx=(6, 0))
 
         # Navigation buttons
         self.nav_btns: dict[str, ctk.CTkButton] = {}
@@ -156,7 +187,7 @@ class ProDownloaderApp:
             ("settings", "⚙️ Cài Đặt & Cookies"),
         ]
 
-        for idx, (key, label) in enumerate(nav_items, start=2):
+        for idx, (key, label) in enumerate(nav_items, start=3):
             btn = ctk.CTkButton(
                 self.sidebar,
                 text=label,
@@ -171,15 +202,15 @@ class ProDownloaderApp:
 
         # Bottom sidebar: Cookie Status & Theme selector
         theme_frame = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        theme_frame.grid(row=7, column=0, padx=14, pady=(0, 14), sticky="ew")
+        theme_frame.grid(row=8, column=0, padx=14, pady=(0, 14), sticky="ew")
 
         cookie_count = len(load_douyin_cookies(None))
         cookie_text = f"🟢 Douyin Cookies ({cookie_count})" if cookie_count > 0 else "🟡 Chưa có Cookie"
         self.cookie_status_badge = ctk.CTkLabel(
             theme_frame,
             text=cookie_text,
-            font=ctk.CTkFont(size=11),
-            text_color="#2ecc71" if cookie_count > 0 else "#f39c12",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#10B981" if cookie_count > 0 else "#F59E0B",
         )
         self.cookie_status_badge.pack(anchor="w", pady=(0, 6))
 
@@ -219,17 +250,26 @@ class ProDownloaderApp:
 
     def _change_theme(self, mode: str) -> None:
         ctk.set_appearance_mode(mode)
+        self.root.after(50, self._style_treeview)
 
     def switch_view(self, name: str) -> None:
         for key, view in self.views.items():
             if key == name:
                 view.grid(row=0, column=0, sticky="nsew")
                 if key in self.nav_btns:
-                    self.nav_btns[key].configure(fg_color=["#3B8ED0", "#1F6AA5"], font=ctk.CTkFont(size=13, weight="bold"))
+                    self.nav_btns[key].configure(
+                        fg_color=["#4F46E5", "#4338CA"],
+                        text_color="#FFFFFF",
+                        font=ctk.CTkFont(size=13, weight="bold"),
+                    )
             else:
                 view.grid_forget()
                 if key in self.nav_btns:
-                    self.nav_btns[key].configure(fg_color="transparent", font=ctk.CTkFont(size=13, weight="normal"))
+                    self.nav_btns[key].configure(
+                        fg_color="transparent",
+                        text_color=["#4B5563", "#D1D5DB"],
+                        font=ctk.CTkFont(size=13, weight="normal"),
+                    )
 
     # =========================================================================
     # VIEW 1: TẢI NHANH (SINGLE / BATCH URLS)
@@ -263,10 +303,10 @@ class ProDownloaderApp:
         btn_box = ctk.CTkFrame(text_container, fg_color="transparent")
         btn_box.grid(row=0, column=1, padx=(10, 0), sticky="ns")
 
-        self.paste_btn = ctk.CTkButton(btn_box, text="📋 Dán & Quét", width=120, height=34, command=self.paste_and_fetch)
+        self.paste_btn = ctk.CTkButton(btn_box, text="📋 Dán & Quét", width=120, height=34, fg_color="#2563EB", hover_color="#1D4ED8", command=self.paste_and_fetch)
         self.paste_btn.pack(pady=(0, 6))
 
-        self.fetch_btn = ctk.CTkButton(btn_box, text="🔍 Quét Link", width=120, height=34, fg_color="#2c3e50", hover_color="#34495e", command=self.fetch_all)
+        self.fetch_btn = ctk.CTkButton(btn_box, text="🔍 Quét Link", width=120, height=34, fg_color="#4F46E5", hover_color="#4338CA", command=self.fetch_all)
         self.fetch_btn.pack()
 
         # Options strip
@@ -294,7 +334,7 @@ class ProDownloaderApp:
         )
         self.quality_box.pack(side="left", padx=(0, 8))
 
-        set_q_btn = ctk.CTkButton(opts_strip, text="Áp dụng Option", width=110, height=28, command=self.set_quality)
+        set_q_btn = ctk.CTkButton(opts_strip, text="Áp dụng Option", width=110, height=28, fg_color=["#4B5563", "#3B82F6"], hover_color=["#374151", "#2563EB"], command=self.set_quality)
         set_q_btn.pack(side="left")
 
         # Translation Controls
@@ -306,8 +346,8 @@ class ProDownloaderApp:
             text="🌐 Dịch Tiếng Việt",
             width=125,
             height=28,
-            fg_color="#2980b9",
-            hover_color="#3498db",
+            fg_color="#7C3AED",
+            hover_color="#6D28D9",
             command=self.translate_all_queue,
         )
         trans_btn.pack(side="left", padx=(0, 6))
@@ -317,8 +357,8 @@ class ProDownloaderApp:
             text="↩️ Tên Gốc",
             width=85,
             height=28,
-            fg_color="#7f8c8d",
-            hover_color="#95a5a6",
+            fg_color=["#4B5563", "#64748B"],
+            hover_color=["#374151", "#475569"],
             command=self.revert_all_queue_titles,
         )
         orig_btn.pack(side="left", padx=(0, 10))
@@ -374,6 +414,8 @@ class ProDownloaderApp:
             act_strip,
             text="⬇️ Tải Mục Đã Chọn",
             height=34,
+            fg_color="#2563EB",
+            hover_color="#1D4ED8",
             command=self.download_selected,
         )
         self.dl_sel_btn.pack(side="left", padx=(0, 8))
@@ -382,8 +424,9 @@ class ProDownloaderApp:
             act_strip,
             text="⚡ Tải Tất Cả",
             height=34,
-            fg_color="#27ae60",
-            hover_color="#2ecc71",
+            fg_color="#059669",
+            hover_color="#047857",
+            font=ctk.CTkFont(size=13, weight="bold"),
             command=self.download_all,
         )
         self.dl_all_btn.pack(side="left", padx=(0, 8))
@@ -392,8 +435,9 @@ class ProDownloaderApp:
             act_strip,
             text="⏹️ Dừng Tải",
             height=34,
-            fg_color="#c0392b",
-            hover_color="#e74c3c",
+            fg_color="#DC2626",
+            hover_color="#B91C1C",
+            font=ctk.CTkFont(size=13, weight="bold"),
             state="disabled",
             command=self.cancel_download,
         )
@@ -403,8 +447,8 @@ class ProDownloaderApp:
             act_strip,
             text="🗑️ Xóa Hàng Đợi",
             height=34,
-            fg_color="#7f8c8d",
-            hover_color="#95a5a6",
+            fg_color=["#4B5563", "#475569"],
+            hover_color=["#374151", "#334155"],
             command=self.clear_queue,
         )
         self.clear_q_btn.pack(side="left", padx=(0, 14))
@@ -413,8 +457,8 @@ class ProDownloaderApp:
             act_strip,
             text="📁 Thư Mục Lưu",
             height=34,
-            fg_color="#34495e",
-            hover_color="#2c3e50",
+            fg_color=["#374151", "#3B4252"],
+            hover_color=["#1F2937", "#2E3440"],
             command=self.choose_folder,
         )
         choose_f_btn.pack(side="left", padx=(0, 8))
@@ -423,8 +467,8 @@ class ProDownloaderApp:
             act_strip,
             text="📂 Mở Thư Mục",
             height=34,
-            fg_color="#34495e",
-            hover_color="#2c3e50",
+            fg_color=["#374151", "#3B4252"],
+            hover_color=["#1F2937", "#2E3440"],
             command=self.open_folder,
         )
         open_f_btn.pack(side="left", padx=(0, 8))
@@ -433,8 +477,8 @@ class ProDownloaderApp:
             act_strip,
             text="▶️ Xem File",
             height=34,
-            fg_color="#7f8c8d",
-            hover_color="#95a5a6",
+            fg_color=["#374151", "#3B4252"],
+            hover_color=["#1F2937", "#2E3440"],
             command=self.open_selected_file,
         )
         open_v_btn.pack(side="left")
@@ -445,27 +489,44 @@ class ProDownloaderApp:
             style.theme_use("clam")
         except Exception:
             pass
+
+        mode = ctk.get_appearance_mode()
+        if mode == "Dark":
+            bg_color = "#18181B"
+            fg_color = "#F4F4F5"
+            field_bg = "#18181B"
+            header_bg = "#27272A"
+            header_fg = "#FFFFFF"
+            sel_bg = "#4F46E5"
+        else:
+            bg_color = "#FFFFFF"
+            fg_color = "#0F172A"
+            field_bg = "#FFFFFF"
+            header_bg = "#F1F5F9"
+            header_fg = "#0F172A"
+            sel_bg = "#4F46E5"
+
         style.configure(
             "Treeview",
-            background="#2b2b2b",
-            foreground="#f0f0f0",
-            fieldbackground="#2b2b2b",
-            rowheight=28,
+            background=bg_color,
+            foreground=fg_color,
+            fieldbackground=field_bg,
+            rowheight=30,
             font=("Segoe UI", 10),
             borderwidth=0,
         )
         style.configure(
             "Treeview.Heading",
-            background="#1e1e1e",
-            foreground="#ffffff",
+            background=header_bg,
+            foreground=header_fg,
             font=("Segoe UI", 10, "bold"),
             relief="flat",
             padding=(6, 6),
         )
         style.map(
             "Treeview",
-            background=[("selected", "#1f538d")],
-            foreground=[("selected", "#ffffff")],
+            background=[("selected", sel_bg)],
+            foreground=[("selected", "#FFFFFF")],
         )
 
     # =========================================================================
@@ -526,6 +587,8 @@ class ProDownloaderApp:
             text="🔍 Quét Kênh",
             width=110,
             height=32,
+            fg_color="#2563EB",
+            hover_color="#1D4ED8",
             command=self.fetch_channel_videos_ui,
         )
         self.channel_fetch_btn.pack(side="left", padx=(0, 8))
@@ -535,8 +598,9 @@ class ProDownloaderApp:
             text="⏹️ Dừng Quét",
             width=110,
             height=32,
-            fg_color="#c0392b",
-            hover_color="#e74c3c",
+            fg_color="#DC2626",
+            hover_color="#B91C1C",
+            font=ctk.CTkFont(size=12, weight="bold"),
             state="disabled",
             command=self.cancel_channel_fetch,
         )
@@ -545,8 +609,9 @@ class ProDownloaderApp:
         dl_direct_btn = ctk.CTkButton(
             bar,
             text="⚡ Tải Toàn Kênh (1-Click)",
-            fg_color="#27ae60",
-            hover_color="#2ecc71",
+            fg_color="#059669",
+            hover_color="#047857",
+            font=ctk.CTkFont(size=12, weight="bold"),
             width=190,
             height=32,
             command=self.download_channel_directly_ui,
@@ -558,8 +623,8 @@ class ProDownloaderApp:
             text="🌐 Dịch Tiếng Việt",
             width=125,
             height=32,
-            fg_color="#2980b9",
-            hover_color="#3498db",
+            fg_color="#7C3AED",
+            hover_color="#6D28D9",
             command=self.translate_channel_items,
         )
         self.channel_trans_btn.pack(side="left", padx=(0, 16))
@@ -617,18 +682,19 @@ class ProDownloaderApp:
         c_bottom_bar = ctk.CTkFrame(frame, fg_color="transparent")
         c_bottom_bar.grid(row=2, column=0, sticky="ew")
 
-        sel_all_btn = ctk.CTkButton(c_bottom_bar, text="Chọn Tất Cả", width=110, height=32, command=self.channel_select_all)
+        sel_all_btn = ctk.CTkButton(c_bottom_bar, text="Chọn Tất Cả", width=110, height=32, fg_color="#2563EB", hover_color="#1D4ED8", command=self.channel_select_all)
         sel_all_btn.pack(side="left", padx=(0, 8))
 
-        desel_all_btn = ctk.CTkButton(c_bottom_bar, text="Bỏ Chọn", width=90, height=32, fg_color="#7f8c8d", hover_color="#95a5a6", command=self.channel_deselect_all)
+        desel_all_btn = ctk.CTkButton(c_bottom_bar, text="Bỏ Chọn", width=90, height=32, fg_color=["#4B5563", "#64748B"], hover_color=["#374151", "#475569"], command=self.channel_deselect_all)
         desel_all_btn.pack(side="left", padx=(0, 14))
 
         add_q_btn = ctk.CTkButton(
             c_bottom_bar,
             text="➕ Thêm Video Đã Chọn Vào Hàng Đợi",
             height=32,
-            fg_color="#3B8ED0",
-            hover_color="#1F6AA5",
+            fg_color="#059669",
+            hover_color="#047857",
+            font=ctk.CTkFont(size=12, weight="bold"),
             command=self.add_channel_selected_to_queue,
         )
         add_q_btn.pack(side="left", padx=(0, 14))
@@ -637,7 +703,7 @@ class ProDownloaderApp:
             c_bottom_bar,
             text="Đã chọn: 0 video",
             font=ctk.CTkFont(size=12, weight="bold"),
-            text_color="#3B8ED0",
+            text_color="#10B981",
         )
         self.channel_selection_info_lbl.pack(side="left")
 
@@ -671,10 +737,10 @@ class ProDownloaderApp:
         h_title = ctk.CTkLabel(bar_inner, text="📜 Lịch Sử Video & Âm Thanh Đã Tải:", font=ctk.CTkFont(size=14, weight="bold"))
         h_title.pack(side="left")
 
-        refresh_btn = ctk.CTkButton(bar_inner, text="🔄 Làm Mới", width=100, height=30, command=self.refresh_history)
+        refresh_btn = ctk.CTkButton(bar_inner, text="🔄 Làm Mới", width=100, height=30, fg_color="#2563EB", hover_color="#1D4ED8", command=self.refresh_history)
         refresh_btn.pack(side="right", padx=(8, 0))
 
-        open_h_btn = ctk.CTkButton(bar_inner, text="Mở File History.json", width=150, height=30, fg_color="#34495e", hover_color="#2c3e50", command=self.open_history_file)
+        open_h_btn = ctk.CTkButton(bar_inner, text="Mở File History.json", width=150, height=30, fg_color=["#4B5563", "#64748B"], hover_color=["#374151", "#475569"], command=self.open_history_file)
         open_h_btn.pack(side="right")
 
         # History Table Card
@@ -706,10 +772,10 @@ class ProDownloaderApp:
         h_actions = ctk.CTkFrame(frame, fg_color="transparent")
         h_actions.grid(row=2, column=0, sticky="ew")
 
-        open_file_btn = ctk.CTkButton(h_actions, text="▶️ Phát File Đang Chọn", height=32, command=self._open_history_selected_file)
+        open_file_btn = ctk.CTkButton(h_actions, text="▶️ Phát File Đang Chọn", height=32, fg_color="#059669", hover_color="#047857", command=self._open_history_selected_file)
         open_file_btn.pack(side="left", padx=(0, 8))
 
-        open_dir_btn = ctk.CTkButton(h_actions, text="📂 Mở Thư Mục Chứa File", height=32, fg_color="#34495e", hover_color="#2c3e50", command=self._open_history_selected_dir)
+        open_dir_btn = ctk.CTkButton(h_actions, text="📂 Mở Thư Mục Chứa File", height=32, fg_color=["#4B5563", "#64748B"], hover_color=["#374151", "#475569"], command=self._open_history_selected_dir)
         open_dir_btn.pack(side="left")
 
     def _open_history_selected_file(self) -> None:
@@ -746,6 +812,41 @@ class ProDownloaderApp:
         frame.grid_columnconfigure(0, weight=1)
         self.views["settings"] = frame
 
+        # Card 0: 🚀 Cập Nhật Ứng Dụng (1-Click Auto Updater)
+        up_card = ctk.CTkFrame(frame, corner_radius=12)
+        up_card.pack(fill="x", pady=(0, 14), padx=6)
+        up_card.grid_columnconfigure(1, weight=1)
+
+        up_title = ctk.CTkLabel(
+            up_card,
+            text="🚀 Cập Nhật Ứng Dụng (1-Click Auto Updater)",
+            font=ctk.CTkFont(size=14, weight="bold"),
+        )
+        up_title.grid(row=0, column=0, columnspan=2, padx=16, pady=(14, 6), sticky="w")
+
+        up_desc = ctk.CTkLabel(
+            up_card,
+            text=f"Phiên bản hiện tại: v{APP_VERSION}. Bạn có thể kiểm tra và cập nhật lên phiên bản mới nhất từ GitHub chỉ với 1 cú click chuột.",
+            font=ctk.CTkFont(size=12),
+            text_color="gray",
+            justify="left",
+        )
+        up_desc.grid(row=1, column=0, columnspan=2, padx=16, pady=(0, 10), sticky="w")
+
+        up_btn_frame = ctk.CTkFrame(up_card, fg_color="transparent")
+        up_btn_frame.grid(row=2, column=0, columnspan=2, padx=16, pady=(0, 14), sticky="w")
+
+        self.settings_check_update_btn = ctk.CTkButton(
+            up_btn_frame,
+            text="🔄 Kiểm Tra Bản Cập Nhật Mới (1-Click)",
+            height=34,
+            fg_color="#4F46E5",
+            hover_color="#4338CA",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.check_and_update_ui,
+        )
+        self.settings_check_update_btn.pack(side="left", padx=(0, 10))
+
         # Card 1: Douyin Cookies Management
         c_card = ctk.CTkFrame(frame, corner_radius=12)
         c_card.pack(fill="x", pady=(0, 14), padx=6)
@@ -771,6 +872,8 @@ class ProDownloaderApp:
             c_btn_frame,
             text="🔑 Nhập Cookie Thủ Công",
             height=34,
+            fg_color="#2563EB",
+            hover_color="#1D4ED8",
             command=self.open_douyin_cookie_dialog,
         )
         paste_c_btn.pack(side="left", padx=(0, 10))
@@ -779,8 +882,8 @@ class ProDownloaderApp:
             c_btn_frame,
             text="🌐 Mở Trình Duyệt Đăng Nhập (Auto Playwright)",
             height=34,
-            fg_color="#8e44ad",
-            hover_color="#9b59b6",
+            fg_color="#7C3AED",
+            hover_color="#6D28D9",
             command=self.setup_douyin_cookies,
         )
         auto_login_btn.pack(side="left")
@@ -894,7 +997,7 @@ class ProDownloaderApp:
         )
         self.status_lbl.grid(row=0, column=0, sticky="w")
 
-        self.progress_bar = ctk.CTkProgressBar(inner, height=8, corner_radius=4)
+        self.progress_bar = ctk.CTkProgressBar(inner, height=8, corner_radius=4, progress_color="#10B981")
         self.progress_bar.set(0.0)
         self.progress_bar.grid(row=1, column=0, sticky="ew", pady=(4, 4))
 
@@ -1794,6 +1897,43 @@ class ProDownloaderApp:
         self.root.destroy()
 
     # =========================================================================
+    # 1-CLICK AUTO UPDATER
+    # =========================================================================
+    def check_and_update_ui(self) -> None:
+        self.status.set("🔍 Đang kiểm tra bản cập nhật từ GitHub...")
+        self.details.set("Đang kết nối đến kho lưu trữ GitHub để kiểm tra phiên bản mới nhất...")
+        self.progress_bar.set(0.2)
+
+        def _worker() -> None:
+            try:
+                info = check_for_updates()
+                self.events.put(("update_check_done", info))
+            except Exception as exc:
+                self.events.put(("update_check_error", str(exc)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _start_apply_update(self) -> None:
+        self.status.set("⏳ Đang chuẩn bị cập nhật...")
+        self.details.set("Vui lòng đợi giây lát trong khi ứng dụng tải phiên bản mới...")
+        self.progress_bar.set(0.3)
+
+        def _worker() -> None:
+            def _cb(msg: str) -> None:
+                self.events.put(("update_applying", msg))
+
+            try:
+                success, msg = perform_one_click_update(progress_callback=_cb)
+                if success:
+                    self.events.put(("update_ready_restart", msg))
+                else:
+                    self.events.put(("update_failed", msg))
+            except Exception as exc:
+                self.events.put(("update_failed", str(exc)))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    # =========================================================================
     # EVENT LOOP & POLLING
     # =========================================================================
     def _poll_events(self) -> None:
@@ -1992,13 +2132,63 @@ class ProDownloaderApp:
             self.is_fetching = False
             self.fetch_btn.configure(
                 text="🔍 Quét Link",
-                fg_color="#2c3e50",
-                hover_color="#34495e",
+                fg_color="#4F46E5",
+                hover_color="#4338CA",
                 command=self.fetch_all,
             )
             if event == "fetch_cancelled":
                 self.status.set("⛔ Đã dừng quét link.")
                 self.details.set("Tiến trình quét liên kết đã dừng lại.")
+        elif event == "update_check_done":
+            info = dict(payload)
+            if info.get("update_available"):
+                ver = info.get("latest_version")
+                title = info.get("release_title") or f"Phiên bản {ver}"
+                notes = info.get("changelog", "Tối ưu hóa và nâng cấp tính năng mới.")
+                self.status.set(f"🚀 Có bản cập nhật mới: {ver}")
+                self.details.set(f"Phiên bản mới: {title} đã sẵn sàng.")
+                if messagebox.askyesno(
+                    "Có Bản Cập Nhật Mới! 🚀",
+                    f"Phát hiện bản cập nhật mới: {title} (v{ver})\n\n"
+                    f"Nội dung thay đổi:\n{notes}\n\n"
+                    f"Bạn có muốn cập nhật ứng dụng tự động ngay bây giờ không?",
+                ):
+                    self._start_apply_update()
+            else:
+                self.status.set(f"✅ Ứng dụng đã ở phiên bản mới nhất (v{APP_VERSION}).")
+                self.details.set("Bạn đang sử dụng bản phát hành mới nhất từ GitHub.")
+                messagebox.showinfo(
+                    "Kiểm Tra Cập Nhật",
+                    f"Ứng dụng đang ở phiên bản mới nhất (v{APP_VERSION}).\nKhông có bản cập nhật nào mới hơn.",
+                )
+        elif event == "update_check_error":
+            err = str(payload)
+            self.status.set("⚠️ Không thể kiểm tra cập nhật.")
+            self.details.set(err)
+            messagebox.showwarning("Kiểm Tra Cập Nhật", f"Không thể kết nối đến máy chủ GitHub để kiểm tra cập nhật:\n{err}")
+        elif event == "update_applying":
+            msg = str(payload)
+            self.status.set("⏳ Đang cập nhật ứng dụng...")
+            self.details.set(msg)
+            self.progress_bar.set(0.6)
+        elif event == "update_ready_restart":
+            self.progress_bar.set(1.0)
+            self.status.set("✅ Cập nhật hoàn tất!")
+            self.details.set("Ứng dụng đang khởi động lại...")
+            messagebox.showinfo(
+                "Cập Nhật Thành Công! 🎉",
+                "Ứng dụng đã được cập nhật thành công lên bản mới nhất.\nChương trình sẽ tự động khởi động lại ngay bây giờ.",
+            )
+            restart_application()
+        elif event == "update_failed":
+            err = str(payload)
+            self.progress_bar.set(0.0)
+            self.status.set("❌ Cập nhật thất bại.")
+            self.details.set(err)
+            messagebox.showerror(
+                "Cập Nhật Thất Bại",
+                f"Đã xảy ra lỗi khi cập nhật ứng dụng:\n{err}\n\nVui lòng thử lại sau hoặc tải trực tiếp từ GitHub.",
+            )
 
     def _update_row(self, item_id: str) -> None:
         if item_id not in self.items:

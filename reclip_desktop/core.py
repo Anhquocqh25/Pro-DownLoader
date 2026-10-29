@@ -23,6 +23,8 @@ from typing import Any, Callable
 URL_SPLIT_RE = re.compile(r"[\s,]+")
 WINDOWS_RESERVED_CHARS = set(r'\/:*?"<>|')
 APP_NAME = "Pro Downloader"
+APP_VERSION = "1.2.0"
+GITHUB_REPO = "Anhquocqh25/Pro-DownLoader"
 APP_DIR = Path(__file__).resolve().parents[1]
 APP_STATE_DIR = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local"))) / APP_NAME if os.name == "nt" else Path.home() / ".local" / "share" / APP_NAME
 LOG_DIR = APP_STATE_DIR / "logs"
